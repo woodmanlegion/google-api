@@ -70,7 +70,7 @@ def http_post(url, data: dict, headers: dict = None) -> dict:
 
 def http_get(url, token=None, params: dict = None) -> dict:
     if params:
-        url = url + "?" + urllib.parse.urlencode(params)
+        url = url + "?" + urllib.parse.urlencode(params, doseq=True)
     req = urllib.request.Request(url)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -525,7 +525,7 @@ def gmail_search(args):
         detail = http_get(
             f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
             token=t, params={"format": "metadata",
-                             "metadataHeaders": "From,Subject,Date"}
+                             "metadataHeaders": ["From", "Subject", "Date"]}
         )
         headers = {h["name"]: h["value"]
                    for h in detail.get("payload", {}).get("headers", [])}
