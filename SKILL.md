@@ -1,6 +1,6 @@
 ---
 name: google-api
-description: "Unified Google API CLI — Gmail, Calendar, Drive, Sheets, Docs, Keep, Tasks, Blogger, Contacts, Photos, Maps. No gog dependency. Device-flow OAuth."
+description: "Unified Google API CLI — Gmail, Calendar, Drive, Sheets, Docs, Tasks, Blogger, Contacts, Photos, Maps. PKCE OAuth, no external dependencies."
 metadata:
   {
     "openclaw":
@@ -13,7 +13,7 @@ metadata:
 
 # google-api
 
-Standalone Google API CLI for Termux. Device-flow OAuth — no browser redirect interception needed.
+Standalone Google API CLI for Termux. PKCE OAuth with localhost redirect — Desktop app client type required. No external dependencies beyond Python 3.8+ stdlib.
 
 ## Config files (all in `~/.config/google-api/`)
 
@@ -159,4 +159,9 @@ google-api maps places "coffee near Grafton Street"
 - Confirms before sending mail, creating calendar events, publishing posts, or deleting
 - `--json` flag available on most list commands for machine-readable output
 - Token stored at `~/.config/google-api/token.json` (chmod 600) — never commit
-- For new Google APIs: check `services list --enabled`, add the scope to `SCOPES` in the script, re-auth
+- For new Google APIs: enable in GCP console, add scope to `SCOPES` in script, re-auth with `auth setup --url-only` + `auth setup --code <redirect-url>`
+- Drive search uses Google query syntax e.g. `"mimeType='application/vnd.google-apps.folder'"` not `"type:folder"`
+- `docs cat` exports via Drive API as plain text — works on Google Docs, not on uploaded files
+- Photos requires `photoslibrary.readonly` scope — add to SCOPES and re-auth after enabling Photos Library API in GCP
+- Maps requires a separate API key (not OAuth) — set `maps_api_key` in `~/.config/google-api/config.json`
+- OAuth consent screen must be External with your account added as a test user (Internal only works for Google Workspace orgs)
