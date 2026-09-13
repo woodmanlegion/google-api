@@ -1,0 +1,1890 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""google-api — unified Google API CLI for openclaw/Termux.
+
+Credentials: ~/.config/google-api/credentials.json  (client_secret.json from Cloud Console)
+Token:       ~/.config/google-api/token.json         (auto-managed)
+Config:      ~/.config/google-api/config.json        (maps_api_key, default_account, etc.)
+"""
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+CONFIG_DIR  = os.path.expanduser("~/.config/google-api")
+CREDS_FILE  = os.path.join(CONFIG_DIR, "credentials.json")
+TOKEN_FILE  = os.path.join(CONFIG_DIR, "token.json")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+# ---------------------------------------------------------------------------
+# OAuth scopes
+# ---------------------------------------------------------------------------
+
+SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/documents.readonly",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/blogger",
+    "https://www.googleapis.com/auth/contacts.readonly",
+    # keep: restricted API, not available to third-party apps
+    # photoslibrary: requires separate Library API enablement — add after enabling
+    # cloud-platform: add after enabling Service Usage API
+    # gmail.settings.basic: add after confirming API enablement
+]
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def die(msg, code=1):
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def http_post(url, data: dict, headers: dict = None) -> dict:
+    body = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    if headers:
+        for k, v in headers.items():
+            req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read().decode())
+
+
+def http_get(url, token=None, params: dict = None) -> dict:
+    if params:
+        url = url + "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read().decode())
+
+
+def http_req(method, url, token, body=None, params=None, content_type="application/json") -> dict:
+    if params:
+        url = url + "?" + urllib.parse.urlencode(params)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    if data:
+        req.add_header("Content-Type", content_type)
+    try:
+        with urllib.request.urlopen(req) as r:
+            raw = r.read().decode()
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as e:
+        return json.loads(e.read().decode())
+
+
+def jprint(obj):
+    print(json.dumps(obj, indent=2, ensure_ascii=False))
+
+
+def load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def save_json(path, obj, mode=0o600):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+    os.chmod(path, mode)
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
+
+def load_creds():
+    data = load_json(CREDS_FILE)
+    if not data:
+        die(f"No credentials found at {CREDS_FILE}\n"
+            f"Copy your client_secret.json from Google Cloud Console there.")
+    # Support both raw installed/web format and flat format
+    if "installed" in data:
+        data = data["installed"]
+    elif "web" in data:
+        data = data["web"]
+    client_id = data.get("client_id")
+    client_secret = data.get("client_secret")
+    if not client_id:
+        die("Could not extract client_id from credentials file.")
+    return client_id, client_secret
+
+
+def load_config():
+    return load_json(CONFIG_FILE) or {}
+
+
+# ---------------------------------------------------------------------------
+# Token management
+# ---------------------------------------------------------------------------
+
+def load_token() -> dict:
+    tok = load_json(TOKEN_FILE)
+    if not tok:
+        die(f"Not authenticated. Run: google-api auth setup")
+    return tok
+
+
+def token_needs_refresh(tok: dict) -> bool:
+    expires_at = tok.get("expires_at", 0)
+    return time.time() >= expires_at - 60
+
+
+def refresh_token(tok: dict) -> dict:
+    client_id, client_secret = load_creds()
+    refresh = tok.get("refresh_token")
+    if not refresh:
+        die("No refresh token. Re-run: google-api auth setup")
+
+    resp = http_post("https://oauth2.googleapis.com/token", {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh,
+        "grant_type": "refresh_token",
+    })
+
+    if "error" in resp:
+        die(f"Token refresh failed: {resp}")
+
+    tok["access_token"] = resp["access_token"]
+    tok["expires_at"] = int(time.time()) + resp.get("expires_in", 3600)
+    save_json(TOKEN_FILE, tok)
+    return tok
+
+
+def get_access_token() -> str:
+    tok = load_token()
+    if token_needs_refresh(tok):
+        tok = refresh_token(tok)
+    return tok["access_token"]
+
+
+# ---------------------------------------------------------------------------
+# auth subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_auth(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "setup":   lambda: auth_setup(rest),
+        "status":  lambda: auth_status(),
+        "refresh": lambda: auth_do_refresh(),
+        "revoke":  lambda: auth_revoke(),
+    }.get(sub, lambda: auth_help())()
+
+
+def auth_help():
+    print("""\
+Usage: google-api auth <command>
+
+  setup [--device]  Authenticate via PKCE (default) or device flow
+  status            Show current auth state and scopes
+  refresh           Force a token refresh
+  revoke            Revoke and delete stored token
+
+PKCE flow (default, works with Desktop app OAuth client):
+  Opens a browser. After approving, paste the full redirect URL
+  (or just the "code=..." value) when prompted.
+
+Device flow (--device, requires "TVs and Limited Input devices" client):
+  Visit accounts.google.com/device and enter the short code shown.
+""")
+
+
+PKCE_STATE_FILE = os.path.join(CONFIG_DIR, ".pkce-state.json")
+
+
+def auth_setup(args):
+    if "--device" in args:
+        auth_setup_device()
+    elif "--code" in args:
+        idx = args.index("--code")
+        if idx + 1 >= len(args):
+            die("--code requires a value")
+        auth_exchange_code(args[idx + 1])
+    elif "--url-only" in args:
+        auth_setup_pkce(url_only=True)
+    else:
+        auth_setup_pkce(url_only=False)
+
+
+def auth_setup_pkce(url_only=False):
+    import base64
+    import hashlib
+    import os as _os
+
+    client_id, client_secret = load_creds()
+    scope_str = urllib.parse.quote(" ".join(SCOPES))
+
+    verifier = base64.urlsafe_b64encode(_os.urandom(32)).rstrip(b"=").decode()
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+
+    redirect_uri = "http://localhost"
+
+    auth_url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={client_id}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        f"&response_type=code"
+        f"&scope={scope_str}"
+        f"&code_challenge={challenge}"
+        f"&code_challenge_method=S256"
+        f"&access_type=offline"
+        f"&prompt=consent"
+    )
+
+    # Save verifier so --code can complete the exchange in a separate invocation
+    save_json(PKCE_STATE_FILE, {"verifier": verifier, "redirect_uri": redirect_uri})
+    os.chmod(PKCE_STATE_FILE, 0o600)
+
+    print(f"Auth URL:\n{auth_url}\n")
+
+    if url_only:
+        return
+
+    import subprocess
+    try:
+        subprocess.run(["termux-open-url", auth_url], check=False, timeout=5)
+    except Exception:
+        pass
+
+    print("After approving, the browser redirects to localhost (which will fail to load).")
+    print("Copy the full URL from the address bar and paste it, or just the code= value.\n")
+
+    raw = input("Paste redirect URL or code: ").strip()
+    if not raw:
+        die("No input provided.")
+    auth_exchange_code(raw)
+
+
+def auth_exchange_code(raw):
+    if not os.path.exists(PKCE_STATE_FILE):
+        die("No PKCE state found — run 'google-api auth setup --url-only' first.")
+    state = load_json(PKCE_STATE_FILE)
+    verifier = state["verifier"]
+    redirect_uri = state["redirect_uri"]
+    client_id, client_secret = load_creds()
+
+    # Accept full redirect URL or bare code
+    if "code=" in raw:
+        code = urllib.parse.parse_qs(urllib.parse.urlparse(raw).query).get("code", [""])[0]
+        if not code:
+            for part in raw.split("&"):
+                if part.startswith("code="):
+                    code = urllib.parse.unquote(part[5:])
+                    break
+    else:
+        code = raw
+
+    if not code:
+        die("Could not extract auth code.")
+
+    print("Exchanging code for token...")
+    tok_resp = http_post("https://oauth2.googleapis.com/token", {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "code_verifier": verifier,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    })
+
+    if "error" in tok_resp:
+        die(f"Token exchange failed: {tok_resp}")
+
+    tok_resp["expires_at"] = int(time.time()) + tok_resp.get("expires_in", 3600)
+    save_json(TOKEN_FILE, tok_resp)
+    try:
+        os.remove(PKCE_STATE_FILE)
+    except OSError:
+        pass
+    print(f"✓ Authenticated — token saved to {TOKEN_FILE}")
+    granted = tok_resp.get("scope", "")
+    if granted:
+        print(f"  Scopes: {len(granted.split())} granted")
+
+
+def auth_setup_device():
+    client_id, client_secret = load_creds()
+    scope_str = " ".join(SCOPES)
+
+    print("=== Google API Device Authorization ===\n")
+    resp = http_post("https://oauth2.googleapis.com/device/code", {
+        "client_id": client_id,
+        "scope": scope_str,
+    })
+
+    if "error" in resp:
+        die(f"Device code request failed: {resp}\n"
+            f"Note: device flow requires an OAuth client of type 'TVs and Limited Input devices'.\n"
+            f"Use 'google-api auth setup' (PKCE) for Desktop app clients.")
+
+    print(f"  Visit:  {resp['verification_url']}")
+    print(f"  Code:   {resp['user_code']}\n")
+    print("Waiting for authorization (Ctrl-C to cancel)...")
+
+    interval = resp.get("interval", 5)
+    device_code = resp["device_code"]
+
+    while True:
+        time.sleep(interval)
+        tok_resp = http_post("https://oauth2.googleapis.com/token", {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        })
+
+        err = tok_resp.get("error")
+        if err == "authorization_pending":
+            print(".", end="", flush=True)
+            continue
+        elif err == "slow_down":
+            interval += 5
+            continue
+        elif err:
+            print()
+            die(f"Auth failed: {tok_resp}")
+
+        print("\n")
+        tok_resp["expires_at"] = int(time.time()) + tok_resp.get("expires_in", 3600)
+        save_json(TOKEN_FILE, tok_resp)
+        print(f"✓ Authenticated — token saved to {TOKEN_FILE}")
+        granted = tok_resp.get("scope", "")
+        if granted:
+            print(f"  Scopes: {len(granted.split())} granted")
+        break
+
+
+def auth_status():
+    tok = load_json(TOKEN_FILE)
+    if not tok:
+        print("Not authenticated.")
+        return
+
+    expires_at = tok.get("expires_at", 0)
+    expires_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+    now = time.time()
+    needs_refresh = now >= expires_at - 60
+
+    print(f"Token file:    {TOKEN_FILE}")
+    print(f"Expires at:    {expires_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"Needs refresh: {'yes' if needs_refresh else 'no'}")
+    print(f"Has refresh:   {'yes' if tok.get('refresh_token') else 'no'}")
+
+    granted = tok.get("scope", "")
+    if granted:
+        print(f"\nGranted scopes ({len(granted.split())}):")
+        for s in granted.split():
+            print(f"  {s}")
+
+    # Try a live check
+    try:
+        t = get_access_token()
+        info = http_get("https://www.googleapis.com/oauth2/v1/tokeninfo", params={"access_token": t})
+        if "email" in info:
+            print(f"\nAuthenticated as: {info['email']}")
+    except Exception:
+        pass
+
+
+def auth_do_refresh():
+    tok = load_token()
+    tok = refresh_token(tok)
+    print(f"✓ Token refreshed, expires at {datetime.fromtimestamp(tok['expires_at'], tz=timezone.utc)}")
+
+
+def auth_revoke():
+    tok = load_json(TOKEN_FILE)
+    if tok and tok.get("access_token"):
+        http_get("https://oauth2.googleapis.com/revoke",
+                 params={"token": tok["access_token"]})
+    if os.path.exists(TOKEN_FILE):
+        os.remove(TOKEN_FILE)
+    print("Token revoked and deleted.")
+
+
+# ---------------------------------------------------------------------------
+# services (Service Usage API)
+# ---------------------------------------------------------------------------
+
+def cmd_services(args):
+    sub = args[0] if args else "list"
+    rest = args[1:]
+
+    cfg = load_config()
+    project = cfg.get("project_id")
+    if not project:
+        die("project_id not set in config.json. Add: {\"project_id\": \"your-project-id\"}")
+
+    t = get_access_token()
+
+    if sub == "list":
+        enabled_only = "--enabled" in rest
+        url = f"https://serviceusage.googleapis.com/v1/projects/{project}/services"
+        params = {"filter": "state:ENABLED"} if enabled_only else {}
+        result = http_get(url, token=t, params=params)
+        if "error" in result:
+            die(f"Services list failed: {result['error'].get('message', result)}")
+        services = result.get("services", [])
+        for svc in services:
+            name = svc.get("name", "").split("/")[-1]
+            state = svc.get("state", "")
+            print(f"{name:<55} {state}")
+        if result.get("nextPageToken"):
+            print(f"\n[More results — use pagination. Total shown: {len(services)}]")
+    else:
+        print("Usage: google-api services list [--enabled]")
+
+
+# ---------------------------------------------------------------------------
+# Gmail
+# ---------------------------------------------------------------------------
+
+def cmd_gmail(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "search": lambda: gmail_search(rest),
+        "read":   lambda: gmail_read(rest),
+        "send":   lambda: gmail_send(rest),
+        "labels": lambda: gmail_labels(rest),
+    }.get(sub, lambda: gmail_help())()
+
+
+def gmail_help():
+    print("""\
+Usage: google-api gmail <command>
+
+  search <query> [--max N] [--json]   Search messages
+  read <message-id> [--json]          Read a message
+  send --to ADDR --subject S --body B Send email
+  labels                              List labels
+""")
+
+
+def gmail_search(args):
+    if not args or args[0].startswith("--"):
+        die("Usage: google-api gmail search <query> [--max N]")
+    query = args[0]
+    max_results = 10
+    as_json = "--json" in args
+    for i, a in enumerate(args):
+        if a == "--max" and i + 1 < len(args):
+            max_results = int(args[i + 1])
+
+    t = get_access_token()
+    result = http_get(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+        token=t, params={"q": query, "maxResults": max_results}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+
+    messages = result.get("messages", [])
+    if as_json:
+        jprint(messages)
+        return
+
+    if not messages:
+        print("No messages found.")
+        return
+
+    for msg in messages:
+        # Fetch summary
+        detail = http_get(
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
+            token=t, params={"format": "metadata",
+                             "metadataHeaders": "From,Subject,Date"}
+        )
+        headers = {h["name"]: h["value"]
+                   for h in detail.get("payload", {}).get("headers", [])}
+        snippet = detail.get("snippet", "")[:80]
+        print(f"[{msg['id']}]")
+        print(f"  From:    {headers.get('From', '')}")
+        print(f"  Subject: {headers.get('Subject', '')}")
+        print(f"  Date:    {headers.get('Date', '')}")
+        print(f"  Snippet: {snippet}")
+        print()
+
+
+def gmail_read(args):
+    if not args:
+        die("Usage: google-api gmail read <message-id>")
+    msg_id = args[0]
+    as_json = "--json" in args
+    t = get_access_token()
+    result = http_get(
+        f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+        token=t, params={"format": "full"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    if as_json:
+        jprint(result)
+        return
+
+    headers = {h["name"]: h["value"]
+               for h in result.get("payload", {}).get("headers", [])}
+    print(f"From:    {headers.get('From', '')}")
+    print(f"To:      {headers.get('To', '')}")
+    print(f"Subject: {headers.get('Subject', '')}")
+    print(f"Date:    {headers.get('Date', '')}")
+    print()
+    # Best-effort body extraction
+    body = _extract_body(result.get("payload", {}))
+    print(body or result.get("snippet", ""))
+
+
+def _extract_body(payload):
+    mime = payload.get("mimeType", "")
+    if mime == "text/plain":
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            import base64
+            return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+    for part in payload.get("parts", []):
+        result = _extract_body(part)
+        if result:
+            return result
+    return ""
+
+
+def gmail_send(args):
+    import base64
+    import email.mime.text
+
+    to = subject = body = ""
+    i = 0
+    while i < len(args):
+        if args[i] == "--to" and i + 1 < len(args):
+            to = args[i + 1]; i += 2
+        elif args[i] == "--subject" and i + 1 < len(args):
+            subject = args[i + 1]; i += 2
+        elif args[i] == "--body" and i + 1 < len(args):
+            body = args[i + 1]; i += 2
+        else:
+            i += 1
+
+    if not to or not subject:
+        die("Usage: google-api gmail send --to ADDR --subject S --body B")
+
+    print(f"Send email to {to!r}, subject {subject!r}?")
+    if input("Confirm [y/N]: ").strip().lower() != "y":
+        print("Aborted.")
+        return
+
+    msg = email.mime.text.MIMEText(body)
+    msg["To"] = to
+    msg["Subject"] = subject
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+    t = get_access_token()
+    result = http_req("POST",
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        token=t, body={"raw": raw}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Sent — message ID: {result.get('id')}")
+
+
+def gmail_labels(args):
+    t = get_access_token()
+    result = http_get("https://gmail.googleapis.com/gmail/v1/users/me/labels", token=t)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    for label in result.get("labels", []):
+        print(f"{label['id']:<30} {label['name']}")
+
+
+# ---------------------------------------------------------------------------
+# Calendar
+# ---------------------------------------------------------------------------
+
+def cmd_calendar(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "events": lambda: calendar_events(rest),
+        "create": lambda: calendar_create(rest),
+        "cals":   lambda: calendar_list(rest),
+    }.get(sub, lambda: calendar_help())()
+
+
+def calendar_help():
+    print("""\
+Usage: google-api calendar <command>
+
+  cals                               List calendars
+  events [--cal ID] [--from ISO] [--to ISO] [--max N]
+  create --summary S --start ISO --end ISO [--cal ID] [--desc D]
+""")
+
+
+def calendar_list(args):
+    t = get_access_token()
+    result = http_get("https://www.googleapis.com/calendar/v3/users/me/calendarList", token=t)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    for cal in result.get("items", []):
+        primary = " (primary)" if cal.get("primary") else ""
+        print(f"{cal['id']:<50} {cal.get('summary','')}{primary}")
+
+
+def calendar_events(args):
+    cal_id = "primary"
+    time_min = time_max = None
+    max_results = 20
+    as_json = "--json" in args
+    i = 0
+    while i < len(args):
+        if args[i] == "--cal" and i + 1 < len(args):
+            cal_id = args[i + 1]; i += 2
+        elif args[i] == "--from" and i + 1 < len(args):
+            time_min = args[i + 1]; i += 2
+        elif args[i] == "--to" and i + 1 < len(args):
+            time_max = args[i + 1]; i += 2
+        elif args[i] == "--max" and i + 1 < len(args):
+            max_results = int(args[i + 1]); i += 2
+        else:
+            i += 1
+
+    params = {"maxResults": max_results, "orderBy": "startTime", "singleEvents": "true"}
+    if time_min:
+        params["timeMin"] = time_min if "T" in time_min else time_min + "T00:00:00Z"
+    if time_max:
+        params["timeMax"] = time_max if "T" in time_max else time_max + "T23:59:59Z"
+
+    t = get_access_token()
+    result = http_get(
+        f"https://www.googleapis.com/calendar/v3/calendars/{urllib.parse.quote(cal_id)}/events",
+        token=t, params=params
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    if as_json:
+        jprint(result)
+        return
+    for event in result.get("items", []):
+        start = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date", "")
+        print(f"{start[:16]}  {event.get('summary', '(no title)')}")
+
+
+def calendar_create(args):
+    summary = start = end = desc = ""
+    cal_id = "primary"
+    i = 0
+    while i < len(args):
+        if args[i] == "--summary" and i + 1 < len(args):
+            summary = args[i + 1]; i += 2
+        elif args[i] == "--start" and i + 1 < len(args):
+            start = args[i + 1]; i += 2
+        elif args[i] == "--end" and i + 1 < len(args):
+            end = args[i + 1]; i += 2
+        elif args[i] == "--desc" and i + 1 < len(args):
+            desc = args[i + 1]; i += 2
+        elif args[i] == "--cal" and i + 1 < len(args):
+            cal_id = args[i + 1]; i += 2
+        else:
+            i += 1
+
+    if not summary or not start or not end:
+        die("Usage: google-api calendar create --summary S --start ISO --end ISO")
+
+    print(f"Create event '{summary}' from {start} to {end}?")
+    if input("Confirm [y/N]: ").strip().lower() != "y":
+        print("Aborted.")
+        return
+
+    body = {
+        "summary": summary,
+        "start": {"dateTime": start} if "T" in start else {"date": start},
+        "end":   {"dateTime": end}   if "T" in end   else {"date": end},
+    }
+    if desc:
+        body["description"] = desc
+
+    t = get_access_token()
+    result = http_req("POST",
+        f"https://www.googleapis.com/calendar/v3/calendars/{urllib.parse.quote(cal_id)}/events",
+        token=t, body=body
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Created — {result.get('htmlLink')}")
+
+
+# ---------------------------------------------------------------------------
+# Drive
+# ---------------------------------------------------------------------------
+
+def cmd_drive(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "search": lambda: drive_search(rest),
+        "ls":     lambda: drive_ls(rest),
+        "mkdir":  lambda: drive_mkdir(rest),
+        "upload": lambda: drive_upload(rest),
+        "share":  lambda: drive_share(rest),
+        "info":   lambda: drive_info(rest),
+    }.get(sub, lambda: drive_help())()
+
+
+def drive_help():
+    print("""\
+Usage: google-api drive <command>
+
+  search <query> [--max N] [--json]
+  ls [--parent ID] [--query Q]
+  mkdir <name> [--parent ID]
+  upload <file> [--parent ID] [--name NAME] [--share]
+  share <file-id> [--to anyone] [--role reader]
+  info <file-id>
+""")
+
+
+def drive_search(args):
+    if not args or args[0].startswith("--"):
+        die("Usage: google-api drive search <query>")
+    query = args[0]
+    max_results = 10
+    as_json = "--json" in args
+    for i, a in enumerate(args):
+        if a == "--max" and i + 1 < len(args):
+            max_results = int(args[i + 1])
+
+    t = get_access_token()
+    result = http_get(
+        "https://www.googleapis.com/drive/v3/files",
+        token=t, params={
+            "q": query,
+            "pageSize": max_results,
+            "fields": "files(id,name,mimeType,size,modifiedTime,webViewLink)"
+        }
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    if as_json:
+        jprint(result.get("files", []))
+        return
+    for f in result.get("files", []):
+        size = f.get("size", "-")
+        mod = f.get("modifiedTime", "")[:10]
+        print(f"{f['id']}  {mod}  {size:>10}  {f['name']}")
+
+
+def drive_ls(args):
+    parent = "root"
+    query = ""
+    as_json = "--json" in args
+    i = 0
+    while i < len(args):
+        if args[i] == "--parent" and i + 1 < len(args):
+            parent = args[i + 1]; i += 2
+        elif args[i] == "--query" and i + 1 < len(args):
+            query = args[i + 1]; i += 2
+        else:
+            i += 1
+
+    q = f"'{parent}' in parents and trashed=false"
+    if query:
+        q += f" and {query}"
+
+    t = get_access_token()
+    result = http_get(
+        "https://www.googleapis.com/drive/v3/files",
+        token=t, params={
+            "q": q,
+            "pageSize": 100,
+            "fields": "files(id,name,mimeType,size,modifiedTime)"
+        }
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    if as_json:
+        jprint(result.get("files", []))
+        return
+    for f in result.get("files", []):
+        size = f.get("size", "-")
+        mod = f.get("modifiedTime", "")[:10]
+        mime = f.get("mimeType", "")
+        icon = "📁" if "folder" in mime else "📄"
+        print(f"{icon} {f['id']}  {mod}  {size:>10}  {f['name']}")
+
+
+def drive_mkdir(args):
+    if not args:
+        die("Usage: google-api drive mkdir <name> [--parent ID]")
+    name = args[0]
+    parent = "root"
+    for i, a in enumerate(args):
+        if a == "--parent" and i + 1 < len(args):
+            parent = args[i + 1]
+
+    t = get_access_token()
+    body = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent],
+    }
+    result = http_req("POST",
+        "https://www.googleapis.com/drive/v3/files",
+        token=t, body=body,
+        params={"fields": "id,name"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Created folder '{result['name']}' — ID: {result['id']}")
+
+
+def drive_upload(args):
+    if not args:
+        die("Usage: google-api drive upload <file> [--parent ID] [--name NAME] [--share]")
+    local_file = args[0]
+    if not os.path.isfile(local_file):
+        die(f"File not found: {local_file}")
+
+    parent = "root"
+    name = os.path.basename(local_file)
+    share = "--share" in args
+    i = 1
+    while i < len(args):
+        if args[i] == "--parent" and i + 1 < len(args):
+            parent = args[i + 1]; i += 2
+        elif args[i] == "--name" and i + 1 < len(args):
+            name = args[i + 1]; i += 2
+        else:
+            i += 1
+
+    import mimetypes
+    mime_type, _ = mimetypes.guess_type(local_file)
+    mime_type = mime_type or "application/octet-stream"
+
+    t = get_access_token()
+
+    # Multipart upload
+    metadata = json.dumps({"name": name, "parents": [parent]}).encode()
+    with open(local_file, "rb") as fh:
+        file_data = fh.read()
+
+    boundary = "===boundary==="
+    body = (
+        f"--{boundary}\r\n"
+        f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+    ).encode() + metadata + (
+        f"\r\n--{boundary}\r\n"
+        f"Content-Type: {mime_type}\r\n\r\n"
+    ).encode() + file_data + f"\r\n--{boundary}--".encode()
+
+    url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink"
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Authorization", f"Bearer {t}")
+    req.add_header("Content-Type", f"multipart/related; boundary={boundary}")
+
+    try:
+        with urllib.request.urlopen(req) as r:
+            result = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        die(json.loads(e.read().decode()))
+
+    print(f"✓ Uploaded '{result['name']}' — ID: {result['id']}")
+    print(f"  Link: {result.get('webViewLink', '')}")
+
+    if share:
+        drive_share([result["id"], "--to", "anyone", "--role", "reader"])
+
+
+def drive_share(args):
+    if not args:
+        die("Usage: google-api drive share <file-id> [--to anyone] [--role reader]")
+    file_id = args[0]
+    to = "anyone"
+    role = "reader"
+    i = 1
+    while i < len(args):
+        if args[i] == "--to" and i + 1 < len(args):
+            to = args[i + 1]; i += 2
+        elif args[i] == "--role" and i + 1 < len(args):
+            role = args[i + 1]; i += 2
+        else:
+            i += 1
+
+    t = get_access_token()
+    result = http_req("POST",
+        f"https://www.googleapis.com/drive/v3/files/{file_id}/permissions",
+        token=t, body={"type": to, "role": role}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Shared — permission ID: {result.get('id')}")
+
+
+def drive_info(args):
+    if not args:
+        die("Usage: google-api drive info <file-id>")
+    file_id = args[0]
+    t = get_access_token()
+    result = http_get(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}",
+        token=t, params={"fields": "id,name,mimeType,size,modifiedTime,webViewLink,parents"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    jprint(result)
+
+
+# ---------------------------------------------------------------------------
+# Sheets
+# ---------------------------------------------------------------------------
+
+def cmd_sheets(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "get":      lambda: sheets_get(rest),
+        "update":   lambda: sheets_update(rest),
+        "append":   lambda: sheets_append(rest),
+        "clear":    lambda: sheets_clear(rest),
+        "metadata": lambda: sheets_metadata(rest),
+    }.get(sub, lambda: sheets_help())()
+
+
+def sheets_help():
+    print("""\
+Usage: google-api sheets <command>
+
+  get <id> <range> [--json]
+  update <id> <range> --values-json '[["A","B"],...]'
+  append <id> <range> --values-json '[["x","y"],...]'
+  clear <id> <range>
+  metadata <id>
+""")
+
+
+def sheets_get(args):
+    if len(args) < 2:
+        die("Usage: google-api sheets get <id> <range>")
+    sheet_id, range_ = args[0], args[1]
+    as_json = "--json" in args
+    t = get_access_token()
+    result = http_get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{urllib.parse.quote(range_)}",
+        token=t
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    if as_json:
+        jprint(result)
+        return
+    for row in result.get("values", []):
+        print("\t".join(str(c) for c in row))
+
+
+def sheets_update(args):
+    if len(args) < 2:
+        die("Usage: google-api sheets update <id> <range> --values-json '[...]'")
+    sheet_id, range_ = args[0], args[1]
+    values_json = ""
+    for i, a in enumerate(args):
+        if a == "--values-json" and i + 1 < len(args):
+            values_json = args[i + 1]
+    if not values_json:
+        die("--values-json required")
+    values = json.loads(values_json)
+    t = get_access_token()
+    result = http_req("PUT",
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{urllib.parse.quote(range_)}",
+        token=t, body={"range": range_, "majorDimension": "ROWS", "values": values},
+        params={"valueInputOption": "USER_ENTERED"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Updated {result.get('updatedCells', '?')} cells")
+
+
+def sheets_append(args):
+    if len(args) < 2:
+        die("Usage: google-api sheets append <id> <range> --values-json '[...]'")
+    sheet_id, range_ = args[0], args[1]
+    values_json = ""
+    for i, a in enumerate(args):
+        if a == "--values-json" and i + 1 < len(args):
+            values_json = args[i + 1]
+    if not values_json:
+        die("--values-json required")
+    values = json.loads(values_json)
+    t = get_access_token()
+    result = http_req("POST",
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{urllib.parse.quote(range_)}:append",
+        token=t, body={"majorDimension": "ROWS", "values": values},
+        params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Appended {result.get('updates', {}).get('updatedCells', '?')} cells")
+
+
+def sheets_clear(args):
+    if len(args) < 2:
+        die("Usage: google-api sheets clear <id> <range>")
+    sheet_id, range_ = args[0], args[1]
+    t = get_access_token()
+    result = http_req("POST",
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{urllib.parse.quote(range_)}:clear",
+        token=t, body={}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Cleared {result.get('clearedRange', range_)}")
+
+
+def sheets_metadata(args):
+    if not args:
+        die("Usage: google-api sheets metadata <id>")
+    sheet_id = args[0]
+    t = get_access_token()
+    result = http_get(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}",
+        token=t, params={"fields": "spreadsheetId,properties,sheets.properties"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    jprint(result)
+
+
+# ---------------------------------------------------------------------------
+# Docs
+# ---------------------------------------------------------------------------
+
+def cmd_docs(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "cat":    lambda: docs_cat(rest),
+        "export": lambda: docs_export(rest),
+        "info":   lambda: docs_info(rest),
+    }.get(sub, lambda: docs_help())()
+
+
+def docs_help():
+    print("""\
+Usage: google-api docs <command>
+
+  cat <doc-id>                           Print document as plain text
+  export <doc-id> [--format txt|pdf|docx] [--out FILE]
+  info <doc-id>                          Document metadata
+""")
+
+
+def docs_cat(args):
+    if not args:
+        die("Usage: google-api docs cat <doc-id>")
+    doc_id = args[0]
+    t = get_access_token()
+    # Export as plain text via Drive
+    url = f"https://www.googleapis.com/drive/v3/files/{doc_id}/export"
+    req = urllib.request.Request(url + "?" + urllib.parse.urlencode({"mimeType": "text/plain"}))
+    req.add_header("Authorization", f"Bearer {t}")
+    try:
+        with urllib.request.urlopen(req) as r:
+            print(r.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        die(json.loads(e.read().decode()))
+
+
+def docs_export(args):
+    if not args:
+        die("Usage: google-api docs export <doc-id> [--format txt] [--out FILE]")
+    doc_id = args[0]
+    fmt = "txt"
+    out_file = None
+    i = 1
+    while i < len(args):
+        if args[i] == "--format" and i + 1 < len(args):
+            fmt = args[i + 1]; i += 2
+        elif args[i] == "--out" and i + 1 < len(args):
+            out_file = args[i + 1]; i += 2
+        else:
+            i += 1
+
+    mime_map = {
+        "txt":  "text/plain",
+        "pdf":  "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "html": "text/html",
+        "md":   "text/markdown",
+    }
+    mime = mime_map.get(fmt, "text/plain")
+
+    t = get_access_token()
+    url = f"https://www.googleapis.com/drive/v3/files/{doc_id}/export"
+    req = urllib.request.Request(url + "?" + urllib.parse.urlencode({"mimeType": mime}))
+    req.add_header("Authorization", f"Bearer {t}")
+    try:
+        with urllib.request.urlopen(req) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        die(json.loads(e.read().decode()))
+
+    if out_file:
+        with open(out_file, "wb") as f:
+            f.write(data)
+        print(f"✓ Exported to {out_file}")
+    else:
+        sys.stdout.buffer.write(data)
+
+
+def docs_info(args):
+    if not args:
+        die("Usage: google-api docs info <doc-id>")
+    doc_id = args[0]
+    t = get_access_token()
+    result = http_get(
+        f"https://docs.googleapis.com/v1/documents/{doc_id}",
+        token=t
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"Title:    {result.get('title')}")
+    print(f"Doc ID:   {result.get('documentId')}")
+    body_content = result.get("body", {}).get("content", [])
+    print(f"Elements: {len(body_content)}")
+
+
+# ---------------------------------------------------------------------------
+# Keep
+# ---------------------------------------------------------------------------
+
+def cmd_keep(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "list":   lambda: keep_list(rest),
+        "get":    lambda: keep_get(rest),
+        "create": lambda: keep_create(rest),
+        "delete": lambda: keep_delete(rest),
+    }.get(sub, lambda: keep_help())()
+
+
+def keep_help():
+    print("""\
+Usage: google-api keep <command>
+
+  list [--trashed]
+  get <note-id>
+  create --title T [--text Body | --list item1,item2]
+  delete <note-id>
+""")
+
+
+def keep_list(args):
+    trashed = "--trashed" in args
+    as_json = "--json" in args
+    t = get_access_token()
+    params = {}
+    if trashed:
+        params["filter"] = "trashed=true"
+    result = http_get("https://keep.googleapis.com/v1/notes", token=t, params=params)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    if as_json:
+        jprint(result)
+        return
+    for note in result.get("notes", []):
+        title = note.get("title", "(no title)")
+        name = note.get("name", "")
+        updated = note.get("updateTime", "")[:10]
+        print(f"{name}  {updated}  {title}")
+
+
+def keep_get(args):
+    if not args:
+        die("Usage: google-api keep get <note-id>")
+    note_id = args[0]
+    if not note_id.startswith("notes/"):
+        note_id = f"notes/{note_id}"
+    t = get_access_token()
+    result = http_get(f"https://keep.googleapis.com/v1/{note_id}", token=t)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    jprint(result)
+
+
+def keep_create(args):
+    title = text = list_items = ""
+    i = 0
+    while i < len(args):
+        if args[i] == "--title" and i + 1 < len(args):
+            title = args[i + 1]; i += 2
+        elif args[i] == "--text" and i + 1 < len(args):
+            text = args[i + 1]; i += 2
+        elif args[i] == "--list" and i + 1 < len(args):
+            list_items = args[i + 1]; i += 2
+        else:
+            i += 1
+
+    if list_items:
+        items = [{"text": {"text": item.strip()}, "checked": False}
+                 for item in list_items.split(",")]
+        body = {"list": {"listItems": items}}
+    else:
+        body = {"text": {"text": text}}
+
+    payload = {"title": title, "body": body}
+    t = get_access_token()
+    result = http_req("POST", "https://keep.googleapis.com/v1/notes", token=t, body=payload)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Created note — {result.get('name')}")
+
+
+def keep_delete(args):
+    if not args:
+        die("Usage: google-api keep delete <note-id>")
+    note_id = args[0]
+    if not note_id.startswith("notes/"):
+        note_id = f"notes/{note_id}"
+    t = get_access_token()
+    result = http_req("DELETE", f"https://keep.googleapis.com/v1/{note_id}", token=t)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Deleted {note_id}")
+
+
+# ---------------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------------
+
+def cmd_tasks(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "lists":      lambda: tasks_lists(rest),
+        "list":       lambda: tasks_list(rest),
+        "create":     lambda: tasks_create(rest),
+        "complete":   lambda: tasks_complete(rest),
+        "uncomplete": lambda: tasks_uncomplete(rest),
+        "delete":     lambda: tasks_delete(rest),
+        "clear":      lambda: tasks_clear(rest),
+    }.get(sub, lambda: tasks_help())()
+
+
+def tasks_help():
+    print("""\
+Usage: google-api tasks <command>
+
+  lists                             List all task lists
+  list <list-id> [--all]            List tasks (default: incomplete only)
+  create <list-id> --title T [--notes N] [--due YYYY-MM-DD]
+  complete <task-id> <list-id>
+  uncomplete <task-id> <list-id>
+  delete <task-id> <list-id>
+  clear <list-id>                   Clear completed tasks
+""")
+
+
+def tasks_lists(args):
+    t = get_access_token()
+    result = http_get("https://tasks.googleapis.com/tasks/v1/users/@me/lists", token=t)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    for lst in result.get("items", []):
+        print(f"{lst['id']:<50} {lst.get('title','')}")
+
+
+def tasks_list(args):
+    if not args:
+        die("Usage: google-api tasks list <list-id> [--all]")
+    list_id = args[0]
+    show_all = "--all" in args
+    t = get_access_token()
+    params = {} if show_all else {"showCompleted": "false"}
+    result = http_get(
+        f"https://tasks.googleapis.com/tasks/v1/lists/{list_id}/tasks",
+        token=t, params=params
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    for task in result.get("items", []):
+        done = "✓" if task.get("status") == "completed" else "○"
+        due = task.get("due", "")[:10]
+        print(f"{done} {due}  {task.get('title','')}")
+        if task.get("notes"):
+            print(f"    {task['notes']}")
+
+
+def tasks_create(args):
+    if not args:
+        die("Usage: google-api tasks create <list-id> --title T")
+    list_id = args[0]
+    title = notes = due = ""
+    i = 1
+    while i < len(args):
+        if args[i] == "--title" and i + 1 < len(args):
+            title = args[i + 1]; i += 2
+        elif args[i] == "--notes" and i + 1 < len(args):
+            notes = args[i + 1]; i += 2
+        elif args[i] == "--due" and i + 1 < len(args):
+            due = args[i + 1]; i += 2
+        else:
+            i += 1
+    if not title:
+        die("--title required")
+    body = {"title": title}
+    if notes:
+        body["notes"] = notes
+    if due:
+        body["due"] = due if "T" in due else due + "T00:00:00.000Z"
+    t = get_access_token()
+    result = http_req("POST",
+        f"https://tasks.googleapis.com/tasks/v1/lists/{list_id}/tasks",
+        token=t, body=body
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Created task '{result.get('title')}' — {result.get('id')}")
+
+
+def tasks_complete(args):
+    if len(args) < 2:
+        die("Usage: google-api tasks complete <task-id> <list-id>")
+    task_id, list_id = args[0], args[1]
+    t = get_access_token()
+    result = http_req("PATCH",
+        f"https://tasks.googleapis.com/tasks/v1/lists/{list_id}/tasks/{task_id}",
+        token=t, body={"status": "completed"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Marked complete")
+
+
+def tasks_uncomplete(args):
+    if len(args) < 2:
+        die("Usage: google-api tasks uncomplete <task-id> <list-id>")
+    task_id, list_id = args[0], args[1]
+    t = get_access_token()
+    result = http_req("PATCH",
+        f"https://tasks.googleapis.com/tasks/v1/lists/{list_id}/tasks/{task_id}",
+        token=t, body={"status": "needsAction", "completed": None}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Marked incomplete")
+
+
+def tasks_delete(args):
+    if len(args) < 2:
+        die("Usage: google-api tasks delete <task-id> <list-id>")
+    task_id, list_id = args[0], args[1]
+    t = get_access_token()
+    result = http_req("DELETE",
+        f"https://tasks.googleapis.com/tasks/v1/lists/{list_id}/tasks/{task_id}",
+        token=t
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Deleted task {task_id}")
+
+
+def tasks_clear(args):
+    if not args:
+        die("Usage: google-api tasks clear <list-id>")
+    list_id = args[0]
+    t = get_access_token()
+    result = http_req("POST",
+        f"https://tasks.googleapis.com/tasks/v1/lists/{list_id}/clear",
+        token=t, body={}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Cleared completed tasks")
+
+
+# ---------------------------------------------------------------------------
+# Blogger
+# ---------------------------------------------------------------------------
+
+def cmd_blogger(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "blogs":  lambda: blogger_blogs(rest),
+        "posts":  lambda: blogger_posts(rest),
+        "post":   lambda: blogger_post(rest),
+        "delete": lambda: blogger_delete(rest),
+    }.get(sub, lambda: blogger_help())()
+
+
+def blogger_help():
+    print("""\
+Usage: google-api blogger <command>
+
+  blogs                              List your blogs
+  posts <blog-id> [--max N]          List posts
+  post <blog-id> --title T --content C [--draft]
+  delete <blog-id> <post-id>
+""")
+
+
+def blogger_blogs(args):
+    t = get_access_token()
+    result = http_get("https://www.googleapis.com/blogger/v3/users/self/blogs", token=t)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    for blog in result.get("items", []):
+        print(f"{blog['id']}  {blog.get('name','')}  {blog.get('url','')}")
+
+
+def blogger_posts(args):
+    if not args:
+        die("Usage: google-api blogger posts <blog-id>")
+    blog_id = args[0]
+    max_results = 10
+    for i, a in enumerate(args):
+        if a == "--max" and i + 1 < len(args):
+            max_results = int(args[i + 1])
+    t = get_access_token()
+    result = http_get(
+        f"https://www.googleapis.com/blogger/v3/blogs/{blog_id}/posts",
+        token=t, params={"maxResults": max_results, "fetchBodies": "false"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    for post in result.get("items", []):
+        pub = post.get("published", "")[:10]
+        print(f"{post['id']}  {pub}  {post.get('title','')}")
+
+
+def blogger_post(args):
+    if not args:
+        die("Usage: google-api blogger post <blog-id> --title T --content C")
+    blog_id = args[0]
+    title = content = ""
+    draft = "--draft" in args
+    i = 1
+    while i < len(args):
+        if args[i] == "--title" and i + 1 < len(args):
+            title = args[i + 1]; i += 2
+        elif args[i] == "--content" and i + 1 < len(args):
+            content = args[i + 1]; i += 2
+        else:
+            i += 1
+    if not title:
+        die("--title required")
+
+    status = "DRAFT" if draft else "LIVE"
+    print(f"Publish post '{title}' to blog {blog_id} [{status}]?")
+    if input("Confirm [y/N]: ").strip().lower() != "y":
+        print("Aborted.")
+        return
+
+    body = {"title": title, "content": content}
+    params = {"isDraft": "true"} if draft else {}
+    t = get_access_token()
+    result = http_req("POST",
+        f"https://www.googleapis.com/blogger/v3/blogs/{blog_id}/posts",
+        token=t, body=body, params=params
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Posted — {result.get('url')}")
+
+
+def blogger_delete(args):
+    if len(args) < 2:
+        die("Usage: google-api blogger delete <blog-id> <post-id>")
+    blog_id, post_id = args[0], args[1]
+    print(f"Delete post {post_id}?")
+    if input("Confirm [y/N]: ").strip().lower() != "y":
+        print("Aborted.")
+        return
+    t = get_access_token()
+    result = http_req("DELETE",
+        f"https://www.googleapis.com/blogger/v3/blogs/{blog_id}/posts/{post_id}",
+        token=t
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Deleted post {post_id}")
+
+
+# ---------------------------------------------------------------------------
+# Contacts (People API)
+# ---------------------------------------------------------------------------
+
+def cmd_contacts(args):
+    sub = args[0] if args else "list"
+    rest = args[1:]
+    {
+        "list":   lambda: contacts_list(rest),
+        "search": lambda: contacts_search(rest),
+        "get":    lambda: contacts_get(rest),
+    }.get(sub, lambda: contacts_help())()
+
+
+def contacts_help():
+    print("""\
+Usage: google-api contacts <command>
+
+  list [--max N]
+  search <query>
+  get <resource-name>
+""")
+
+
+def contacts_list(args):
+    max_results = 20
+    as_json = "--json" in args
+    for i, a in enumerate(args):
+        if a == "--max" and i + 1 < len(args):
+            max_results = int(args[i + 1])
+    t = get_access_token()
+    result = http_get(
+        "https://people.googleapis.com/v1/people/me/connections",
+        token=t, params={
+            "pageSize": max_results,
+            "personFields": "names,emailAddresses,phoneNumbers"
+        }
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    if as_json:
+        jprint(result)
+        return
+    for p in result.get("connections", []):
+        name = (p.get("names") or [{}])[0].get("displayName", "")
+        emails = [e["value"] for e in p.get("emailAddresses", [])]
+        phones = [ph["value"] for ph in p.get("phoneNumbers", [])]
+        print(f"{name:<30} {', '.join(emails):<35} {', '.join(phones)}")
+
+
+def contacts_search(args):
+    if not args:
+        die("Usage: google-api contacts search <query>")
+    query = args[0]
+    t = get_access_token()
+    result = http_get(
+        "https://people.googleapis.com/v1/people:searchContacts",
+        token=t, params={"query": query, "readMask": "names,emailAddresses,phoneNumbers"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    for r in result.get("results", []):
+        p = r.get("person", {})
+        name = (p.get("names") or [{}])[0].get("displayName", "")
+        emails = [e["value"] for e in p.get("emailAddresses", [])]
+        print(f"{name:<30} {', '.join(emails)}")
+
+
+def contacts_get(args):
+    if not args:
+        die("Usage: google-api contacts get <resource-name>")
+    resource = args[0]
+    t = get_access_token()
+    result = http_get(
+        f"https://people.googleapis.com/v1/{resource}",
+        token=t, params={"personFields": "names,emailAddresses,phoneNumbers,organizations,birthdays"}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    jprint(result)
+
+
+# ---------------------------------------------------------------------------
+# Photos
+# ---------------------------------------------------------------------------
+
+def cmd_photos(args):
+    sub = args[0] if args else "list"
+    rest = args[1:]
+    {
+        "list":   lambda: photos_list(rest),
+        "albums": lambda: photos_albums(rest),
+        "search": lambda: photos_search(rest),
+    }.get(sub, lambda: photos_help())()
+
+
+def photos_help():
+    print("""\
+Usage: google-api photos <command>
+
+  list [--max N] [--json]
+  albums [--max N]
+  search --date YYYY-MM-DD [--max N]
+""")
+
+
+def photos_list(args):
+    max_results = 20
+    as_json = "--json" in args
+    for i, a in enumerate(args):
+        if a == "--max" and i + 1 < len(args):
+            max_results = int(args[i + 1])
+    t = get_access_token()
+    result = http_get(
+        "https://photoslibrary.googleapis.com/v1/mediaItems",
+        token=t, params={"pageSize": max_results}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    if as_json:
+        jprint(result)
+        return
+    for item in result.get("mediaItems", []):
+        created = item.get("mediaMetadata", {}).get("creationTime", "")[:10]
+        print(f"{item['id'][:20]}  {created}  {item.get('filename','')}")
+
+
+def photos_albums(args):
+    max_results = 20
+    for i, a in enumerate(args):
+        if a == "--max" and i + 1 < len(args):
+            max_results = int(args[i + 1])
+    t = get_access_token()
+    result = http_get(
+        "https://photoslibrary.googleapis.com/v1/albums",
+        token=t, params={"pageSize": max_results}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    for album in result.get("albums", []):
+        count = album.get("mediaItemsCount", "?")
+        print(f"{album['id'][:20]}  {count:>5} items  {album.get('title','')}")
+
+
+def photos_search(args):
+    date = ""
+    max_results = 20
+    i = 0
+    while i < len(args):
+        if args[i] == "--date" and i + 1 < len(args):
+            date = args[i + 1]; i += 2
+        elif args[i] == "--max" and i + 1 < len(args):
+            max_results = int(args[i + 1]); i += 2
+        else:
+            i += 1
+
+    body = {"pageSize": max_results}
+    if date:
+        try:
+            y, m, d = date.split("-")
+            body["filters"] = {
+                "dateFilter": {"dates": [{"year": int(y), "month": int(m), "day": int(d)}]}
+            }
+        except ValueError:
+            die("--date must be YYYY-MM-DD")
+
+    t = get_access_token()
+    req_url = "https://photoslibrary.googleapis.com/v1/mediaItems:search"
+    result = http_req("POST", req_url, token=t, body=body)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    for item in result.get("mediaItems", []):
+        created = item.get("mediaMetadata", {}).get("creationTime", "")[:10]
+        print(f"{item['id'][:20]}  {created}  {item.get('filename','')}")
+
+
+# ---------------------------------------------------------------------------
+# Maps (API key — no OAuth)
+# ---------------------------------------------------------------------------
+
+def cmd_maps(args):
+    sub = args[0] if args else "help"
+    rest = args[1:]
+    {
+        "geocode":    lambda: maps_geocode(rest),
+        "directions": lambda: maps_directions(rest),
+        "places":     lambda: maps_places(rest),
+    }.get(sub, lambda: maps_help())()
+
+
+def maps_help():
+    print("""\
+Usage: google-api maps <command>  (requires maps_api_key in config.json)
+
+  geocode <address>
+  directions <origin> <destination> [--mode driving|walking|transit|bicycling]
+  places <query> [--location lat,lng] [--radius M]
+""")
+
+
+def get_maps_key():
+    cfg = load_config()
+    key = cfg.get("maps_api_key")
+    if not key:
+        die("maps_api_key not set in ~/.config/google-api/config.json")
+    return key
+
+
+def maps_geocode(args):
+    if not args:
+        die("Usage: google-api maps geocode <address>")
+    address = " ".join(args)
+    key = get_maps_key()
+    result = http_get(
+        "https://maps.googleapis.com/maps/api/geocode/json",
+        params={"address": address, "key": key}
+    )
+    if result.get("status") != "OK":
+        die(f"Geocode failed: {result.get('status')} — {result.get('error_message','')}")
+    for r in result.get("results", []):
+        loc = r["geometry"]["location"]
+        print(f"{r['formatted_address']}")
+        print(f"  lat={loc['lat']}, lng={loc['lng']}")
+
+
+def maps_directions(args):
+    if len(args) < 2:
+        die("Usage: google-api maps directions <origin> <destination> [--mode driving]")
+    origin = args[0]
+    dest = args[1]
+    mode = "driving"
+    for i, a in enumerate(args):
+        if a == "--mode" and i + 1 < len(args):
+            mode = args[i + 1]
+    key = get_maps_key()
+    result = http_get(
+        "https://maps.googleapis.com/maps/api/directions/json",
+        params={"origin": origin, "destination": dest, "mode": mode, "key": key}
+    )
+    if result.get("status") != "OK":
+        die(f"Directions failed: {result.get('status')} — {result.get('error_message','')}")
+    for route in result.get("routes", []):
+        for leg in route.get("legs", []):
+            print(f"{leg['start_address']} → {leg['end_address']}")
+            print(f"  Distance: {leg['distance']['text']}")
+            print(f"  Duration: {leg['duration']['text']}")
+            for i, step in enumerate(leg.get("steps", []), 1):
+                import html
+                instr = html.unescape(step.get("html_instructions",""))
+                # strip HTML tags
+                import re
+                instr = re.sub(r"<[^>]+>", " ", instr).strip()
+                print(f"  {i:>2}. {instr} ({step['distance']['text']})")
+
+
+def maps_places(args):
+    if not args:
+        die("Usage: google-api maps places <query>")
+    query = args[0]
+    location = radius = ""
+    for i, a in enumerate(args):
+        if a == "--location" and i + 1 < len(args):
+            location = args[i + 1]
+        elif a == "--radius" and i + 1 < len(args):
+            radius = args[i + 1]
+    key = get_maps_key()
+    params = {"query": query, "key": key}
+    if location:
+        params["location"] = location
+    if radius:
+        params["radius"] = radius
+    result = http_get(
+        "https://maps.googleapis.com/maps/api/place/textsearch/json",
+        params=params
+    )
+    if result.get("status") not in ("OK", "ZERO_RESULTS"):
+        die(f"Places failed: {result.get('status')} — {result.get('error_message','')}")
+    for place in result.get("results", []):
+        rating = place.get("rating", "-")
+        print(f"{place['name']}")
+        print(f"  {place.get('formatted_address','')}")
+        print(f"  Rating: {rating}  Types: {', '.join(place.get('types',[])[:3])}")
+        print()
+
+
+# ---------------------------------------------------------------------------
+# Top-level dispatch
+# ---------------------------------------------------------------------------
+
+COMMANDS = {
+    "auth":      cmd_auth,
+    "services":  cmd_services,
+    "gmail":     cmd_gmail,
+    "calendar":  cmd_calendar,
+    "drive":     cmd_drive,
+    "sheets":    cmd_sheets,
+    "docs":      cmd_docs,
+    "keep":      cmd_keep,
+    "tasks":     cmd_tasks,
+    "blogger":   cmd_blogger,
+    "contacts":  cmd_contacts,
+    "photos":    cmd_photos,
+    "maps":      cmd_maps,
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(f"""\
+google-api — unified Google API CLI
+
+Usage: google-api <service> <command> [args]
+
+Services:
+  auth        Authenticate (device flow) and manage tokens
+  services    List enabled Google Cloud APIs (Service Usage API)
+  gmail       Gmail — search, read, send
+  calendar    Google Calendar — list cals, events, create
+  drive       Google Drive — search, upload, mkdir, share
+  sheets      Google Sheets — get, update, append, clear
+  docs        Google Docs — cat, export
+  keep        Google Keep — list, create, delete
+  tasks       Google Tasks — lists, create, complete
+  blogger     Blogger — blogs, posts, publish
+  contacts    Google Contacts (People API)
+  photos      Google Photos — list, albums, search
+  maps        Maps — geocode, directions, places  (API key)
+
+Config: {CONFIG_DIR}/
+  credentials.json  — OAuth client secret (from Cloud Console)
+  token.json        — auto-managed
+  config.json       — project_id, maps_api_key, etc.
+""")
+        return
+
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+
+    handler = COMMANDS.get(cmd)
+    if not handler:
+        die(f"Unknown service '{cmd}'. Run: google-api --help")
+
+    handler(args)
+
+
+if __name__ == "__main__":
+    main()

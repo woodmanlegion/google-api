@@ -1,0 +1,7 @@
+# Never commit credentials or tokens
+credentials.json
+token.json
+.pkce-state.json
+*.bak
+__pycache__/
+*.pyc
