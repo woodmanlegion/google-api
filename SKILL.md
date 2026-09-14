@@ -136,23 +136,24 @@ google-api contacts search "Alice"
 google-api contacts get people/c12345678
 ```
 
-## Photos
+## Photos (via Drive)
+
+Lists and searches images stored in Google Drive/Photos. Uses the Drive API
+— no separate scope needed. Albums not available; use `google-photos-api`
+skill for full Photos Library access (requires Google app verification).
 
 ```bash
 google-api photos list --max 20
-google-api photos albums
-google-api photos search --date 2026-09-01
+google-api photos search --date 2026-09-13
 ```
 
-## Maps (API key, not OAuth)
+## Related skills
 
-Requires `maps_api_key` in `~/.config/google-api/config.json`.
-
-```bash
-google-api maps geocode "Dublin, Ireland"
-google-api maps directions "Dublin" "Cork" --mode driving
-google-api maps places "coffee near Grafton Street"
-```
+| Skill | Auth | Purpose |
+|-------|------|---------|
+| `google-maps-api` | API key | Geocode, directions, places |
+| `google-photos-api` | OAuth (restricted) | Full Photos Library — albums, search, upload |
+| `google-firebase-api` | Service account | Firestore, Realtime DB, Cloud Functions |
 
 ## Notes
 
@@ -162,6 +163,4 @@ google-api maps places "coffee near Grafton Street"
 - For new Google APIs: enable in GCP console, add scope to `SCOPES` in script, re-auth with `auth setup --url-only` + `auth setup --code <redirect-url>`
 - Drive search uses Google query syntax e.g. `"mimeType='application/vnd.google-apps.folder'"` not `"type:folder"`
 - `docs cat` exports via Drive API as plain text — works on Google Docs, not on uploaded files
-- Photos requires `photoslibrary.readonly` scope — add to SCOPES and re-auth after enabling Photos Library API in GCP
-- Maps requires a separate API key (not OAuth) — set `maps_api_key` in `~/.config/google-api/config.json`
 - OAuth consent screen must be External with your account added as a test user (Internal only works for Google Workspace orgs)

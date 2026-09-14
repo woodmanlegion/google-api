@@ -40,7 +40,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/blogger",
     "https://www.googleapis.com/auth/contacts.readonly",
     # keep: restricted API, not available to third-party apps
-    # photoslibrary: requires separate Library API enablement — add after enabling
+    # photoslibrary: restricted scope requiring Google app verification — use drive photos instead
     # cloud-platform: add after enabling Service Usage API
     # gmail.settings.basic: add after confirming API enablement
 ]
@@ -76,9 +76,11 @@ def http_get(url, token=None, params: dict = None) -> dict:
         req.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(req) as r:
-            return json.loads(r.read().decode())
+            raw = r.read().decode()
+            return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as e:
-        return json.loads(e.read().decode())
+        raw = e.read().decode()
+        return json.loads(raw) if raw.strip() else {"error": {"status": e.code}}
 
 
 def http_req(method, url, token, body=None, params=None, content_type="application/json") -> dict:
@@ -1624,7 +1626,7 @@ def contacts_get(args):
 
 
 # ---------------------------------------------------------------------------
-# Photos
+# Photos (via Drive — Photos Library API requires Google app verification)
 # ---------------------------------------------------------------------------
 
 def cmd_photos(args):
@@ -1632,7 +1634,6 @@ def cmd_photos(args):
     rest = args[1:]
     {
         "list":   lambda: photos_list(rest),
-        "albums": lambda: photos_albums(rest),
         "search": lambda: photos_search(rest),
     }.get(sub, lambda: photos_help())()
 
@@ -1641,9 +1642,11 @@ def photos_help():
     print("""\
 Usage: google-api photos <command>
 
-  list [--max N] [--json]
-  albums [--max N]
-  search --date YYYY-MM-DD [--max N]
+  list [--max N] [--json]          List recent images from Drive
+  search --date YYYY-MM-DD [--max N]  Search images by date (createdTime)
+
+Note: Uses Google Drive API (mimeType image/*). Albums not available via
+Drive. For full Photos Library access use the google-photos-api skill.
 """)
 
 
@@ -1655,34 +1658,23 @@ def photos_list(args):
             max_results = int(args[i + 1])
     t = get_access_token()
     result = http_get(
-        "https://photoslibrary.googleapis.com/v1/mediaItems",
-        token=t, params={"pageSize": max_results}
+        "https://www.googleapis.com/drive/v3/files",
+        token=t, params={
+            "q": "mimeType contains 'image/' and trashed=false",
+            "pageSize": max_results,
+            "orderBy": "createdTime desc",
+            "fields": "files(id,name,mimeType,createdTime,size)",
+        }
     )
     if "error" in result:
         die(result["error"].get("message", str(result)))
     if as_json:
-        jprint(result)
+        jprint(result.get("files", []))
         return
-    for item in result.get("mediaItems", []):
-        created = item.get("mediaMetadata", {}).get("creationTime", "")[:10]
-        print(f"{item['id'][:20]}  {created}  {item.get('filename','')}")
-
-
-def photos_albums(args):
-    max_results = 20
-    for i, a in enumerate(args):
-        if a == "--max" and i + 1 < len(args):
-            max_results = int(args[i + 1])
-    t = get_access_token()
-    result = http_get(
-        "https://photoslibrary.googleapis.com/v1/albums",
-        token=t, params={"pageSize": max_results}
-    )
-    if "error" in result:
-        die(result["error"].get("message", str(result)))
-    for album in result.get("albums", []):
-        count = album.get("mediaItemsCount", "?")
-        print(f"{album['id'][:20]}  {count:>5} items  {album.get('title','')}")
+    for f in result.get("files", []):
+        created = f.get("createdTime", "")[:10]
+        size = int(f.get("size", 0))
+        print(f"{f['id'][:20]}  {created}  {size:>10}  {f['name']}")
 
 
 def photos_search(args):
@@ -1697,24 +1689,30 @@ def photos_search(args):
         else:
             i += 1
 
-    body = {"pageSize": max_results}
+    q = "mimeType contains 'image/' and trashed=false"
     if date:
         try:
-            y, m, d = date.split("-")
-            body["filters"] = {
-                "dateFilter": {"dates": [{"year": int(y), "month": int(m), "day": int(d)}]}
-            }
+            datetime.strptime(date, "%Y-%m-%d")
+            q += f" and createdTime >= '{date}T00:00:00Z' and createdTime < '{date}T23:59:59Z'"
         except ValueError:
             die("--date must be YYYY-MM-DD")
 
     t = get_access_token()
-    req_url = "https://photoslibrary.googleapis.com/v1/mediaItems:search"
-    result = http_req("POST", req_url, token=t, body=body)
+    result = http_get(
+        "https://www.googleapis.com/drive/v3/files",
+        token=t, params={
+            "q": q,
+            "pageSize": max_results,
+            "orderBy": "createdTime desc",
+            "fields": "files(id,name,mimeType,createdTime,size)",
+        }
+    )
     if "error" in result:
         die(result["error"].get("message", str(result)))
-    for item in result.get("mediaItems", []):
-        created = item.get("mediaMetadata", {}).get("creationTime", "")[:10]
-        print(f"{item['id'][:20]}  {created}  {item.get('filename','')}")
+    for f in result.get("files", []):
+        created = f.get("createdTime", "")[:10]
+        size = int(f.get("size", 0))
+        print(f"{f['id'][:20]}  {created}  {size:>10}  {f['name']}")
 
 
 # ---------------------------------------------------------------------------
@@ -1843,7 +1841,6 @@ COMMANDS = {
     "blogger":   cmd_blogger,
     "contacts":  cmd_contacts,
     "photos":    cmd_photos,
-    "maps":      cmd_maps,
 }
 
 
@@ -1866,13 +1863,17 @@ Services:
   tasks       Google Tasks — lists, create, complete
   blogger     Blogger — blogs, posts, publish
   contacts    Google Contacts (People API)
-  photos      Google Photos — list, albums, search
-  maps        Maps — geocode, directions, places  (API key)
+  photos      Images via Drive (list, search by date)
+
+Related skills (separate auth models):
+  google-maps-api    Maps geocode/directions/places (API key)
+  google-photos-api  Full Photos Library (restricted scope, needs verification)
+  google-firebase-api  Firebase/Firestore (service account)
 
 Config: {CONFIG_DIR}/
   credentials.json  — OAuth client secret (from Cloud Console)
   token.json        — auto-managed
-  config.json       — project_id, maps_api_key, etc.
+  config.json       — project_id, etc.
 """)
         return
 
