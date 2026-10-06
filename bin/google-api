@@ -377,7 +377,7 @@ def auth_setup_pkce(url_only=False):
             ok = "code" in code_holder
             msg = "Authenticated — you can close this tab." if ok else "Waiting for authorization..."
             self.send_response(200)
-            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(f"<html><body><p>{msg}</p></body></html>".encode())
 
