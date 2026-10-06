@@ -217,8 +217,17 @@ Usage: google-api auth <command>
   revoke            Revoke and delete stored token
 
 PKCE flow (default, works with Desktop app OAuth client):
-  Opens a browser. After approving, paste the full redirect URL
-  (or just the "code=..." value) when prompted.
+  Starts a local callback listener and captures the authorization code
+  automatically when you approve -- nothing to copy or paste. The URL is
+  printed and saved to ~/.config/google-api/last-auth-url.txt (plain
+  text, reliable regardless of terminal scrollback); also best-effort
+  opened via termux-open-url. Open it on *any* browser on this device --
+  it doesn't matter which, the listener only needs the redirect to reach
+  127.0.0.1 here, which every browser on this host can do equally well.
+
+  --url-only: skip the listener entirely, just print the URL and save
+  PKCE state for a separate `auth setup --code <redirect-url-or-code>`
+  call later -- for completing the flow from a different device/session.
 
 Device flow (--device, requires "TVs and Limited Input devices" client):
   Visit accounts.google.com/device and enter the short code shown.
@@ -242,6 +251,83 @@ def auth_setup(args):
         auth_setup_pkce(url_only=False)
 
 
+def _build_auth_url(client_id, redirect_uri, scope_str, challenge):
+    return (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={client_id}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
+        f"&response_type=code"
+        f"&scope={scope_str}"
+        f"&code_challenge={challenge}"
+        f"&code_challenge_method=S256"
+        f"&access_type=offline"
+        f"&prompt=consent"
+    )
+
+
+AUTH_URL_FILE = os.path.join(CONFIG_DIR, "last-auth-url.txt")
+
+
+def _save_auth_url(url):
+    """Always write the URL to a known, plain-text file, independent of
+    terminal scrollback/capture. Whatever ends up completing the OAuth
+    approval step -- X11 chromium, the Android browser, something on a
+    different device entirely -- only needs this one unambiguous string,
+    copy-pasted or relayed by whatever means is actually reliable in a
+    given context. This is the path that's actually depended on; auto-open
+    below is pure convenience on top of it, never load-bearing."""
+    try:
+        with open(AUTH_URL_FILE, "w") as f:
+            f.write(url + "\n")
+        os.chmod(AUTH_URL_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def _open_auth_url(url):
+    """Best-effort only -- auth still works with zero effect from this
+    function (the URL is always printed and saved to AUTH_URL_FILE first).
+
+    Deliberately a single mechanism (termux-open-url), not a preference
+    ladder between X11 and the Android browser: the local callback server
+    this pairs with listens on loopback, so it doesn't matter which browser
+    completes the human-approval step -- X11 chromium and the Android
+    browser both reach the same 127.0.0.1 listener on the same device
+    equally well. Picking one as "preferred" bought nothing but an extra
+    assumption (that $DISPLAY/X11 is present) that doesn't hold in general."""
+    import subprocess
+    try:
+        subprocess.run(["termux-open-url", url], check=False, timeout=5)
+    except Exception:
+        pass
+
+
+def _do_token_exchange(code, verifier, redirect_uri, client_id, client_secret):
+    print("Exchanging code for token...")
+    tok_resp = http_post("https://oauth2.googleapis.com/token", {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "code_verifier": verifier,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    })
+
+    if "error" in tok_resp:
+        die(f"Token exchange failed: {tok_resp}")
+
+    tok_resp["expires_at"] = int(time.time()) + tok_resp.get("expires_in", 3600)
+    save_json(TOKEN_FILE, tok_resp)
+    try:
+        os.remove(PKCE_STATE_FILE)
+    except OSError:
+        pass
+    print(f"✓ Authenticated — token saved to {TOKEN_FILE}")
+    granted = tok_resp.get("scope", "")
+    if granted:
+        print(f"  Scopes: {len(granted.split())} granted")
+
+
 def auth_setup_pkce(url_only=False):
     import base64
     import hashlib
@@ -255,42 +341,69 @@ def auth_setup_pkce(url_only=False):
         hashlib.sha256(verifier.encode()).digest()
     ).rstrip(b"=").decode()
 
-    redirect_uri = "http://localhost"
-
-    auth_url = (
-        "https://accounts.google.com/o/oauth2/v2/auth"
-        f"?client_id={client_id}"
-        f"&redirect_uri={urllib.parse.quote(redirect_uri)}"
-        f"&response_type=code"
-        f"&scope={scope_str}"
-        f"&code_challenge={challenge}"
-        f"&code_challenge_method=S256"
-        f"&access_type=offline"
-        f"&prompt=consent"
-    )
-
-    # Save verifier so --code can complete the exchange in a separate invocation
-    save_json(PKCE_STATE_FILE, {"verifier": verifier, "redirect_uri": redirect_uri})
-    os.chmod(PKCE_STATE_FILE, 0o600)
-
-    print(f"Auth URL:\n{auth_url}\n")
-
     if url_only:
+        # No local listener here -- this is the fully manual/async path,
+        # completed later by a separate `auth setup --code ...` invocation.
+        redirect_uri = "http://localhost"
+        auth_url = _build_auth_url(client_id, redirect_uri, scope_str, challenge)
+        save_json(PKCE_STATE_FILE, {"verifier": verifier, "redirect_uri": redirect_uri})
+        os.chmod(PKCE_STATE_FILE, 0o600)
+        _save_auth_url(auth_url)
+        print(f"Auth URL (also saved to {AUTH_URL_FILE}):\n{auth_url}\n")
+        print("After approving, run: google-api auth setup --code <redirect-url-or-code>")
         return
 
-    import subprocess
-    try:
-        subprocess.run(["termux-open-url", auth_url], check=False, timeout=5)
-    except Exception:
-        pass
+    # Default path: listen on an ephemeral local port and capture the
+    # authorization code directly from the real redirect request. Google's
+    # loopback-redirect handling for Desktop-app OAuth clients accepts any
+    # port on http://localhost even though the registered redirect_uri is
+    # the bare "http://localhost" with no port -- no GCP Console change
+    # needed. This removes the old "copy the URL out of a dead page" step
+    # entirely: nothing to screen-read, nothing to paste.
+    import http.server
 
-    print("After approving, the browser redirects to localhost (which will fail to load).")
-    print("Copy the full URL from the address bar and paste it, or just the code= value.\n")
+    code_holder = {}
 
-    raw = input("Paste redirect URL or code: ").strip()
-    if not raw:
-        die("No input provided.")
-    auth_exchange_code(raw)
+    class _CallbackHandler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass  # quiet -- don't spam the terminal with HTTP access logs
+
+        def do_GET(self):
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if "code" in params:
+                code_holder["code"] = params["code"][0]
+            elif "error" in params:
+                code_holder["error"] = params["error"][0]
+            ok = "code" in code_holder
+            msg = "Authenticated — you can close this tab." if ok else "Waiting for authorization..."
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(f"<html><body><p>{msg}</p></body></html>".encode())
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), _CallbackHandler)
+    redirect_uri = f"http://localhost:{httpd.server_port}"
+    auth_url = _build_auth_url(client_id, redirect_uri, scope_str, challenge)
+
+    _save_auth_url(auth_url)
+    print(f"Auth URL (also saved to {AUTH_URL_FILE}):\n{auth_url}\n")
+    print("Open it anywhere on this device and approve it -- this completes automatically,")
+    print("nothing to copy or paste back. Also attempting to open it automatically now.")
+    _open_auth_url(auth_url)
+
+    deadline = time.time() + 300  # 5 minutes to complete the browser flow
+    while "code" not in code_holder and "error" not in code_holder:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        httpd.timeout = remaining
+        httpd.handle_request()
+    httpd.server_close()
+
+    if "code" not in code_holder:
+        die(f"No authorization code received (error: {code_holder.get('error') or 'timed out'}).")
+
+    _do_token_exchange(code_holder["code"], verifier, redirect_uri, client_id, client_secret)
 
 
 def auth_exchange_code(raw):
@@ -315,29 +428,7 @@ def auth_exchange_code(raw):
     if not code:
         die("Could not extract auth code.")
 
-    print("Exchanging code for token...")
-    tok_resp = http_post("https://oauth2.googleapis.com/token", {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "code": code,
-        "code_verifier": verifier,
-        "redirect_uri": redirect_uri,
-        "grant_type": "authorization_code",
-    })
-
-    if "error" in tok_resp:
-        die(f"Token exchange failed: {tok_resp}")
-
-    tok_resp["expires_at"] = int(time.time()) + tok_resp.get("expires_in", 3600)
-    save_json(TOKEN_FILE, tok_resp)
-    try:
-        os.remove(PKCE_STATE_FILE)
-    except OSError:
-        pass
-    print(f"✓ Authenticated — token saved to {TOKEN_FILE}")
-    granted = tok_resp.get("scope", "")
-    if granted:
-        print(f"  Scopes: {len(granted.split())} granted")
+    _do_token_exchange(code, verifier, redirect_uri, client_id, client_secret)
 
 
 def auth_setup_device():
