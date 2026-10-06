@@ -4,6 +4,9 @@
 Credentials: ~/.config/google-api/credentials.json  (client_secret.json from Cloud Console)
 Token:       ~/.config/google-api/token.json         (auto-managed)
 Config:      ~/.config/google-api/config.json        (maps_api_key, default_account, etc.)
+App password: ~/.config/google-api/app.passwd        (optional; Gmail App Password —
+               when present, "gmail send" prefers SMTP over the API, which is required
+               for inline images via --image. Generate at myaccount.google.com/apppasswords.)
 """
 
 import json
@@ -490,7 +493,11 @@ Usage: google-api gmail <command>
 
   search <query> [--max N] [--json]   Search messages
   read <message-id> [--json]          Read a message
-  send --to ADDR --subject S --body B [--yes]  Send email (prompts to confirm unless --yes)
+  send --to ADDR --subject S --body B [--image PATH[:CID]]... [--yes]
+                                       Send email. Uses SMTP (inline images
+                                       via --image) if ~/.config/google-api/
+                                       app.passwd exists, else the Gmail API
+                                       (no inline images). Prompts unless --yes.
   labels                              List labels
 """)
 
@@ -582,33 +589,69 @@ def _extract_body(payload):
     return ""
 
 
-def gmail_send(args):
+APP_PASSWD_FILE = os.path.join(CONFIG_DIR, "app.passwd")
+
+
+def _load_app_password():
+    """Gmail App Password for SMTP send, if the operator has dropped one in.
+
+    When present, SMTP becomes the preferred send path (supports inline
+    images via multipart/related + Content-ID, which the plain REST API
+    send below cannot do). Absent, REST send is used as before."""
+    try:
+        with open(APP_PASSWD_FILE) as f:
+            pw = f.read().strip()
+            return pw or None
+    except FileNotFoundError:
+        return None
+
+
+def _authenticated_email():
+    t = get_access_token()
+    info = http_get("https://www.googleapis.com/oauth2/v1/tokeninfo", params={"access_token": t})
+    return info.get("email")
+
+
+def _gmail_send_smtp(to, subject, body, images, app_password):
+    import smtplib
+    import email.mime.multipart
+    import email.mime.text
+    import email.mime.image
+
+    from_addr = _authenticated_email()
+    if not from_addr:
+        die("Could not determine authenticated Gmail address for SMTP login")
+
+    msg = email.mime.multipart.MIMEMultipart("related")
+    msg["To"] = to
+    msg["From"] = from_addr
+    msg["Subject"] = subject
+    msg.attach(email.mime.text.MIMEText(body, "html"))
+
+    for path, cid in images:
+        if not os.path.exists(path):
+            die(f"Image not found: {path}")
+        with open(path, "rb") as f:
+            img = email.mime.image.MIMEImage(f.read())
+        img.add_header("Content-ID", f"<{cid}>")
+        img.add_header("Content-Disposition", "inline", filename=os.path.basename(path))
+        msg.attach(img)
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+            s.starttls()
+            s.login(from_addr, app_password)
+            s.send_message(msg)
+    except smtplib.SMTPException as exc:
+        die(f"SMTP send failed: {exc}")
+    print(f"✓ Sent via SMTP to {to}")
+
+
+def _gmail_send_api(to, subject, body):
     import base64
     import email.mime.text
 
-    to = subject = body = ""
-    confirmed = "--yes" in args or "-y" in args
-    i = 0
-    while i < len(args):
-        if args[i] == "--to" and i + 1 < len(args):
-            to = args[i + 1]; i += 2
-        elif args[i] == "--subject" and i + 1 < len(args):
-            subject = args[i + 1]; i += 2
-        elif args[i] == "--body" and i + 1 < len(args):
-            body = args[i + 1]; i += 2
-        else:
-            i += 1
-
-    if not to or not subject:
-        die("Usage: google-api gmail send --to ADDR --subject S --body B [--yes]")
-
-    if not confirmed:
-        print(f"Send email to {to!r}, subject {subject!r}?")
-        if input("Confirm [y/N]: ").strip().lower() != "y":
-            print("Aborted.")
-            return
-
-    msg = email.mime.text.MIMEText(body)
+    msg = email.mime.text.MIMEText(body, "html")
     msg["To"] = to
     msg["Subject"] = subject
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
@@ -621,6 +664,49 @@ def gmail_send(args):
     if "error" in result:
         die(result["error"].get("message", str(result)))
     print(f"✓ Sent — message ID: {result.get('id')}")
+
+
+def gmail_send(args):
+    to = subject = body = ""
+    images = []  # [(path, cid), ...] — SMTP path only
+    confirmed = "--yes" in args or "-y" in args
+    i = 0
+    while i < len(args):
+        if args[i] == "--to" and i + 1 < len(args):
+            to = args[i + 1]; i += 2
+        elif args[i] == "--subject" and i + 1 < len(args):
+            subject = args[i + 1]; i += 2
+        elif args[i] == "--body" and i + 1 < len(args):
+            body = args[i + 1]; i += 2
+        elif args[i] == "--image" and i + 1 < len(args):
+            spec = args[i + 1]
+            path, _, cid = spec.partition(":")
+            if not cid:
+                cid = os.path.splitext(os.path.basename(path))[0]
+            images.append((path, cid))
+            i += 2
+        else:
+            i += 1
+
+    if not to or not subject:
+        die("Usage: google-api gmail send --to ADDR --subject S --body B "
+            "[--image PATH[:CID] ...] [--yes]")
+
+    app_password = _load_app_password()
+    if images and not app_password:
+        die(f"--image requires an app password at {APP_PASSWD_FILE} (SMTP-only feature)")
+
+    if not confirmed:
+        via = "SMTP, inline images supported" if app_password else "Gmail API, no inline images"
+        print(f"Send email to {to!r}, subject {subject!r} via {via}?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    if app_password:
+        _gmail_send_smtp(to, subject, body, images, app_password)
+    else:
+        _gmail_send_api(to, subject, body)
 
 
 def gmail_labels(args):

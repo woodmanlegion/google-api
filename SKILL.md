@@ -56,8 +56,17 @@ Requires `project_id` in `~/.config/google-api/config.json`:
 google-api gmail search 'newer_than:7d is:unread' --max 20
 google-api gmail read <message-id>
 google-api gmail send --to a@b.com --subject "Hi" --body "Hello"
+google-api gmail send --to a@b.com --subject "Hi" --body '<p>See attached <img src="cid:photo"></p>' --image /path/to/photo.jpg
 google-api gmail labels
 ```
+
+`gmail send` uses the Gmail API by default — no inline images possible (the API path
+only builds a single-part message). If `~/.config/google-api/app.passwd` holds a Gmail
+App Password (myaccount.google.com/apppasswords, requires 2-Step Verification), it
+switches automatically to SMTP instead, which is required for `--image` (repeatable;
+`PATH` or `PATH:CID` — defaults the CID to the filename without extension, reference it
+in `--body` as `cid:NAME`). Nothing else about the command changes; `gmail send` with no
+`--image` still works the same either way, just over a different transport.
 
 ## Calendar
 
@@ -157,7 +166,7 @@ google-api photos search --date 2026-09-13
 
 ## Notes
 
-- Confirms before sending mail, creating calendar events, publishing posts, or deleting
+- Confirms before sending mail, creating calendar events, publishing posts, or deleting — pass `--yes`/`-y` on `gmail send` or `blogger post` to skip it for headless/agent use
 - `--json` flag available on most list commands for machine-readable output
 - Token stored at `~/.config/google-api/token.json` (chmod 600) — never commit
 - For new Google APIs: enable in GCP console, add scope to `SCOPES` in script, re-auth with `auth setup --url-only` + `auth setup --code <redirect-url>`
