@@ -29,7 +29,9 @@ Standalone Google API CLI for Termux. PKCE OAuth with localhost redirect — Des
 # Copy your client_secret.json from Cloud Console
 cp /path/to/client_secret.json ~/.config/google-api/credentials.json
 
-# Start device auth — visit the URL shown, enter the short code
+# Opens a browser; approve the request there. Completes automatically —
+# nothing to copy or paste. (The URL is also always printed and saved to
+# ~/.config/google-api/last-auth-url.txt, in case nothing auto-opens.)
 google-api auth setup
 
 # Verify
