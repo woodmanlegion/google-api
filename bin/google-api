@@ -1849,7 +1849,7 @@ def contacts_create(args):
     if phone:
         body["phoneNumbers"] = [{"value": phone}]
     if note:
-        body["biographies"] = [{"value": note, "contentType": "TEXT"}]
+        body["biographies"] = [{"value": note, "contentType": "TEXT_PLAIN"}]
 
     t = get_access_token()
     result = http_req("POST", "https://people.googleapis.com/v1/people:createContact", token=t, body=body)
@@ -1892,7 +1892,7 @@ def contacts_update(args):
             print("Aborted.")
             return
 
-    body = {"etag": etag, "biographies": [{"value": note, "contentType": "TEXT"}]}
+    body = {"etag": etag, "biographies": [{"value": note, "contentType": "TEXT_PLAIN"}]}
     result = http_req(
         "PATCH", f"https://people.googleapis.com/v1/{resource}:updateContact",
         token=t, body=body, params={"updatePersonFields": "biographies"},
