@@ -38,14 +38,15 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/documents.readonly",
+    "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/tasks",
     "https://www.googleapis.com/auth/blogger",
-    "https://www.googleapis.com/auth/contacts.readonly",
+    "https://www.googleapis.com/auth/contacts",
+    "https://www.googleapis.com/auth/gmail.labels",
+    "https://www.googleapis.com/auth/gmail.settings.basic",
     # keep: restricted API, not available to third-party apps
     # photoslibrary: restricted scope requiring Google app verification — use drive photos instead
     # cloud-platform: add after enabling Service Usage API
-    # gmail.settings.basic: add after confirming API enablement
 ]
 
 # ---------------------------------------------------------------------------
