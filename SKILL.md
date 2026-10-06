@@ -137,6 +137,12 @@ google-api blogger post <blog-id> --title "Draft" --content "..." --draft
 google-api blogger delete <blog-id> <post-id>
 ```
 
+No image support here at all — Blogger v3 has no media resource (no upload, no list,
+no delete). An image on `blogger.googleusercontent.com` can only be removed via
+Blogger's own web UI at `blogger.com/mediamanager`, and unlinking it from a post
+(deleting the `<img>` tag, or even deleting the post/blog entirely) does not delete
+the file — it stays live at that URL. Don't expect `blogger delete` to touch images.
+
 ## Contacts
 
 ```bash
