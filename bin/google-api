@@ -738,7 +738,7 @@ Usage: google-api calendar <command>
 
   cals                               List calendars
   events [--cal ID] [--from ISO] [--to ISO] [--max N]
-  create --summary S --start ISO --end ISO [--cal ID] [--desc D]
+  create --summary S --start ISO --end ISO [--cal ID] [--desc D] [--yes]
 """)
 
 
@@ -794,6 +794,7 @@ def calendar_events(args):
 def calendar_create(args):
     summary = start = end = desc = ""
     cal_id = "primary"
+    confirmed = "--yes" in args or "-y" in args
     i = 0
     while i < len(args):
         if args[i] == "--summary" and i + 1 < len(args):
@@ -810,12 +811,13 @@ def calendar_create(args):
             i += 1
 
     if not summary or not start or not end:
-        die("Usage: google-api calendar create --summary S --start ISO --end ISO")
+        die("Usage: google-api calendar create --summary S --start ISO --end ISO [--yes]")
 
-    print(f"Create event '{summary}' from {start} to {end}?")
-    if input("Confirm [y/N]: ").strip().lower() != "y":
-        print("Aborted.")
-        return
+    if not confirmed:
+        print(f"Create event '{summary}' from {start} to {end}?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
 
     body = {
         "summary": summary,
@@ -1545,7 +1547,7 @@ Usage: google-api blogger <command>
   blogs                              List your blogs
   posts <blog-id> [--max N]          List posts
   post <blog-id> --title T --content C [--draft] [--yes]  (prompts to confirm unless --yes)
-  delete <blog-id> <post-id>
+  delete <blog-id> <post-id> [--yes]
 """)
 
 
@@ -1617,12 +1619,14 @@ def blogger_post(args):
 
 def blogger_delete(args):
     if len(args) < 2:
-        die("Usage: google-api blogger delete <blog-id> <post-id>")
+        die("Usage: google-api blogger delete <blog-id> <post-id> [--yes]")
     blog_id, post_id = args[0], args[1]
-    print(f"Delete post {post_id}?")
-    if input("Confirm [y/N]: ").strip().lower() != "y":
-        print("Aborted.")
-        return
+    confirmed = "--yes" in args or "-y" in args
+    if not confirmed:
+        print(f"Delete post {post_id}?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
     t = get_access_token()
     result = http_req("DELETE",
         f"https://www.googleapis.com/blogger/v3/blogs/{blog_id}/posts/{post_id}",
