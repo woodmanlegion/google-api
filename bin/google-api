@@ -1740,6 +1740,9 @@ def cmd_contacts(args):
         "list":   lambda: contacts_list(rest),
         "search": lambda: contacts_search(rest),
         "get":    lambda: contacts_get(rest),
+        "create": lambda: contacts_create(rest),
+        "update": lambda: contacts_update(rest),
+        "delete": lambda: contacts_delete(rest),
     }.get(sub, lambda: contacts_help())()
 
 
@@ -1750,6 +1753,10 @@ Usage: google-api contacts <command>
   list [--max N]
   search <query>
   get <resource-name>
+  create --name NAME [--email ADDR] [--phone NUM] [--note TEXT] [--yes]
+  update <resource-name> [--note TEXT] [--yes]
+         (prompts to confirm unless --yes; --note replaces the Notes field)
+  delete <resource-name> [--yes]
 """)
 
 
@@ -1804,11 +1811,114 @@ def contacts_get(args):
     t = get_access_token()
     result = http_get(
         f"https://people.googleapis.com/v1/{resource}",
-        token=t, params={"personFields": "names,emailAddresses,phoneNumbers,organizations,birthdays"}
+        token=t, params={"personFields": "names,emailAddresses,phoneNumbers,organizations,birthdays,biographies"}
     )
     if "error" in result:
         die(result["error"].get("message", str(result)))
     jprint(result)
+
+
+def contacts_create(args):
+    name = email = phone = note = ""
+    confirmed = "--yes" in args or "-y" in args
+    i = 0
+    while i < len(args):
+        if args[i] == "--name" and i + 1 < len(args):
+            name = args[i + 1]; i += 2
+        elif args[i] == "--email" and i + 1 < len(args):
+            email = args[i + 1]; i += 2
+        elif args[i] == "--phone" and i + 1 < len(args):
+            phone = args[i + 1]; i += 2
+        elif args[i] == "--note" and i + 1 < len(args):
+            note = args[i + 1]; i += 2
+        else:
+            i += 1
+
+    if not name:
+        die("Usage: google-api contacts create --name NAME [--email ADDR] [--phone NUM] [--note TEXT] [--yes]")
+
+    if not confirmed:
+        print(f"Create contact {name!r}?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    body = {"names": [{"unstructuredName": name}]}
+    if email:
+        body["emailAddresses"] = [{"value": email}]
+    if phone:
+        body["phoneNumbers"] = [{"value": phone}]
+    if note:
+        body["biographies"] = [{"value": note, "contentType": "TEXT"}]
+
+    t = get_access_token()
+    result = http_req("POST", "https://people.googleapis.com/v1/people:createContact", token=t, body=body)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Created — {result.get('resourceName')}")
+
+
+def contacts_update(args):
+    if not args:
+        die("Usage: google-api contacts update <resource-name> [--note TEXT] [--yes]")
+    resource = args[0]
+    rest = args[1:]
+    note = None
+    confirmed = "--yes" in rest or "-y" in rest
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--note" and i + 1 < len(rest):
+            note = rest[i + 1]; i += 2
+        else:
+            i += 1
+
+    if note is None:
+        die("Nothing to update — pass --note TEXT (the only field this command currently supports).")
+
+    t = get_access_token()
+    # People API's updateContact requires the current etag for optimistic
+    # concurrency -- fetch it fresh rather than trust a caller-supplied one.
+    current = http_get(f"https://people.googleapis.com/v1/{resource}",
+                        token=t, params={"personFields": "biographies"})
+    if "error" in current:
+        die(current["error"].get("message", str(current)))
+    etag = current.get("etag")
+    if not etag:
+        die("Could not fetch current etag for this contact.")
+
+    if not confirmed:
+        print(f"Update Notes on {resource} to {note!r}?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    body = {"etag": etag, "biographies": [{"value": note, "contentType": "TEXT"}]}
+    result = http_req(
+        "PATCH", f"https://people.googleapis.com/v1/{resource}:updateContact",
+        token=t, body=body, params={"updatePersonFields": "biographies"},
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Updated — {result.get('resourceName', resource)}")
+
+
+def contacts_delete(args):
+    if not args:
+        die("Usage: google-api contacts delete <resource-name> [--yes]")
+    resource = args[0]
+    confirmed = "--yes" in args or "-y" in args
+
+    if not confirmed:
+        print(f"Delete contact {resource}? This cannot be undone.")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    t = get_access_token()
+    result = http_req("DELETE", f"https://people.googleapis.com/v1/{resource}:deleteContact", token=t)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Deleted — {resource}")
 
 
 # ---------------------------------------------------------------------------

@@ -161,7 +161,17 @@ the file — it stays live at that URL. Don't expect `blogger delete` to touch i
 google-api contacts list --max 30
 google-api contacts search "Alice"
 google-api contacts get people/c12345678
+google-api contacts create --name "Alice Example" --email a@b.com --phone "+1 555 0100"
+google-api contacts update people/c12345678 --note "Private -- do not publish or share."
+google-api contacts delete people/c12345678
 ```
+
+`update` currently only supports `--note` (the Notes/biography field) -- it's the one
+write operation this needed so far, not full field coverage. It replaces the whole
+Notes field (not append), fetches the current `etag` itself first (People API requires
+it for its own optimistic-concurrency check), and needs `get`'s `biographies` field to
+read back what's there. `create`/`update`/`delete` all prompt for confirmation unless
+`--yes` is passed, same pattern as `blogger`/`calendar`/`gmail`.
 
 ## Photos (via Drive)
 
