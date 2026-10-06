@@ -49,6 +49,16 @@ Requires `project_id` in `~/.config/google-api/config.json`:
 ```json
 { "project_id": "your-project-id" }
 ```
+Don't guess the project ID or dig through the Console for it — it's already sitting in
+`~/.config/google-api/credentials.json`'s `project_id` field (the same project the OAuth
+client itself was registered under).
+
+**Also currently non-functional even with `project_id` set**: `services.list` needs
+`https://www.googleapis.com/auth/cloud-platform` or `.../cloud-platform.read-only` — neither
+is in `SCOPES`. Fails with "Request had insufficient authentication scopes" otherwise. Adding
+`cloud-platform.read-only` would fix this; not done yet because it's a notably broad scope to
+grant a personal-use CLI (even read-only, it's project-wide, not limited to Service Usage) —
+a deliberate decision to make, not a drive-by scope add like the others in this doc.
 
 ## Gmail
 
