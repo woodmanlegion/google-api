@@ -490,7 +490,7 @@ Usage: google-api gmail <command>
 
   search <query> [--max N] [--json]   Search messages
   read <message-id> [--json]          Read a message
-  send --to ADDR --subject S --body B Send email
+  send --to ADDR --subject S --body B [--yes]  Send email (prompts to confirm unless --yes)
   labels                              List labels
 """)
 
@@ -587,6 +587,7 @@ def gmail_send(args):
     import email.mime.text
 
     to = subject = body = ""
+    confirmed = "--yes" in args or "-y" in args
     i = 0
     while i < len(args):
         if args[i] == "--to" and i + 1 < len(args):
@@ -599,12 +600,13 @@ def gmail_send(args):
             i += 1
 
     if not to or not subject:
-        die("Usage: google-api gmail send --to ADDR --subject S --body B")
+        die("Usage: google-api gmail send --to ADDR --subject S --body B [--yes]")
 
-    print(f"Send email to {to!r}, subject {subject!r}?")
-    if input("Confirm [y/N]: ").strip().lower() != "y":
-        print("Aborted.")
-        return
+    if not confirmed:
+        print(f"Send email to {to!r}, subject {subject!r}?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
 
     msg = email.mime.text.MIMEText(body)
     msg["To"] = to
@@ -1456,7 +1458,7 @@ Usage: google-api blogger <command>
 
   blogs                              List your blogs
   posts <blog-id> [--max N]          List posts
-  post <blog-id> --title T --content C [--draft]
+  post <blog-id> --title T --content C [--draft] [--yes]  (prompts to confirm unless --yes)
   delete <blog-id> <post-id>
 """)
 
@@ -1492,10 +1494,11 @@ def blogger_posts(args):
 
 def blogger_post(args):
     if not args:
-        die("Usage: google-api blogger post <blog-id> --title T --content C")
+        die("Usage: google-api blogger post <blog-id> --title T --content C [--draft] [--yes]")
     blog_id = args[0]
     title = content = ""
     draft = "--draft" in args
+    confirmed = "--yes" in args or "-y" in args
     i = 1
     while i < len(args):
         if args[i] == "--title" and i + 1 < len(args):
@@ -1508,10 +1511,11 @@ def blogger_post(args):
         die("--title required")
 
     status = "DRAFT" if draft else "LIVE"
-    print(f"Publish post '{title}' to blog {blog_id} [{status}]?")
-    if input("Confirm [y/N]: ").strip().lower() != "y":
-        print("Aborted.")
-        return
+    if not confirmed:
+        print(f"Publish post '{title}' to blog {blog_id} [{status}]?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
 
     body = {"title": title, "content": content}
     params = {"isDraft": "true"} if draft else {}
