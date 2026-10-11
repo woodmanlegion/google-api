@@ -219,11 +219,17 @@ Usage: google-api auth <command>
 PKCE flow (default, works with Desktop app OAuth client):
   Starts a local callback listener and captures the authorization code
   automatically when you approve -- nothing to copy or paste. The URL is
-  printed and saved to ~/.config/google-api/last-auth-url.txt (plain
-  text, reliable regardless of terminal scrollback); the browser is also
-  opened via a best-effort platform launcher. Any browser on this host
-  works -- the listener only needs the redirect to reach 127.0.0.1.
-  127.0.0.1 here, which every browser on this host can do equally well.
+  always printed and saved to ~/.config/google-api/last-auth-url.txt
+  (plain text, reliable regardless of terminal scrollback) *before* any
+  attempt to open a browser -- copy it from there any time, on any device.
+  After a 2-second pause, the browser is also opened via a best-effort
+  platform launcher. Any browser on this host works -- the listener only
+  needs the redirect to reach 127.0.0.1, which every browser on this host
+  can do equally well.
+
+  --no-auto-open: skip the automatic browser launch entirely; print/save
+  the URL and wait for the redirect, nothing else. Use this if auto-open
+  has ever grabbed focus unexpectedly or opened the wrong browser/device.
 
   --url-only: skip the listener entirely, just print the URL and save
   PKCE state for a separate `auth setup --code <redirect-url-or-code>`
@@ -238,6 +244,7 @@ PKCE_STATE_FILE = os.path.join(CONFIG_DIR, ".pkce-state.json")
 
 
 def auth_setup(args):
+    auto_open = "--no-auto-open" not in args
     if "--device" in args:
         auth_setup_device()
     elif "--code" in args:
@@ -248,7 +255,7 @@ def auth_setup(args):
     elif "--url-only" in args:
         auth_setup_pkce(url_only=True)
     else:
-        auth_setup_pkce(url_only=False)
+        auth_setup_pkce(url_only=False, auto_open=auto_open)
 
 
 def _build_auth_url(client_id, redirect_uri, scope_str, challenge):
@@ -303,13 +310,19 @@ def _open_auth_url(url):
 
     The URL is already printed to the console and saved to AUTH_URL_FILE,
     so auto-open is pure convenience. Use a small platform ladder so one
-    script works on Termux, Debian, Windows, and macOS without configuration."""
+    script works on Termux, Debian, Windows, and macOS without configuration.
+
+    Linux/macOS go through stdlib `webbrowser` rather than a hardcoded
+    `xdg-open`/`open` binary: `webbrowser` already tries several backends
+    (xdg-open, gio, x-www-browser, sensible-browser, etc.) and fails quietly
+    if none exist -- important on headless Pi boxes with no desktop
+    environment, where a bare `xdg-open` call often isn't installed at all."""
     import subprocess
     opener = {
         "windows": lambda: os.startfile(url),
         "termux": lambda: subprocess.run(["termux-open-url", url], check=False, timeout=5),
-        "linux": lambda: subprocess.run(["xdg-open", url], check=False, timeout=5),
-        "macos": lambda: subprocess.run(["open", url], check=False, timeout=5),
+        "linux": lambda: __import__("webbrowser").open(url, new=1),
+        "macos": lambda: __import__("webbrowser").open(url, new=1),
     }
     try:
         fn = opener.get(_detect_platform())
@@ -346,7 +359,7 @@ def _do_token_exchange(code, verifier, redirect_uri, client_id, client_secret):
 
 
 
-def auth_setup_pkce(url_only=False):
+def auth_setup_pkce(url_only=False, auto_open=True):
     import base64
     import hashlib
     import os as _os
@@ -406,8 +419,14 @@ def auth_setup_pkce(url_only=False):
     _save_auth_url(auth_url)
     print(f"Auth URL (also saved to {AUTH_URL_FILE}):\n{auth_url}\n")
     print("Open it anywhere on this device and approve it -- this completes automatically,")
-    print("nothing to copy or paste back. Also attempting to open it automatically now.")
-    _open_auth_url(auth_url)
+    print("nothing to copy or paste back.")
+    if auto_open:
+        print("Copy the URL above now if you'd rather open it yourself.")
+        print("Auto-opening a browser in 2 seconds (pass --no-auto-open to disable)...")
+        time.sleep(2)
+        _open_auth_url(auth_url)
+    else:
+        print("Auto-open disabled (--no-auto-open) -- open the URL above yourself.")
 
     deadline = time.time() + 300  # 5 minutes to complete the browser flow
     while "code" not in code_holder and "error" not in code_holder:
