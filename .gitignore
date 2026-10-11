@@ -1,7 +1,12 @@
-# Never commit credentials or tokens
+# Never commit credentials, tokens, or transient auth state
 credentials.json
 token.json
 .pkce-state.json
+last-auth-url.txt
+app.passwd
 *.bak
 __pycache__/
 *.pyc
+
+# Local copy of config.json; keep config.example in the repo
+config.json

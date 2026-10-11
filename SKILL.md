@@ -13,7 +13,26 @@ metadata:
 
 # google-api
 
-Standalone Google API CLI for Termux. PKCE OAuth with localhost redirect — Desktop app client type required. No external dependencies beyond Python 3.8+ stdlib.
+Cross-platform Google API CLI (Termux/Android, Debian, Windows). PKCE OAuth with localhost redirect — Desktop app client type required. No external dependencies beyond Python 3.8+ stdlib.
+
+## Install
+
+Choose the per-platform installer, or just copy `bin/google-api` onto your PATH manually.
+
+```bash
+# Termux / Android
+make install-termux
+
+# Debian / most Linux
+make install-debian
+```
+
+```powershell
+# Windows
+make install-windows
+```
+
+The same `bin/google-api` script runs on all platforms. Platform-specific behavior is limited to the auth browser-launch ladder (`os.startfile` / `xdg-open` / `termux-open-url`) and the installers themselves.
 
 ## Config files (all in `~/.config/google-api/`)
 
