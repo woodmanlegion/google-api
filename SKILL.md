@@ -32,7 +32,7 @@ make install-debian
 make install-windows
 ```
 
-The same `bin/google-api` script runs on all platforms. Platform-specific behavior is limited to the auth browser-launch ladder (`os.startfile` / `xdg-open` / `termux-open-url`) and the installers themselves.
+The same `bin/google-api` script runs on all platforms. Platform-specific behavior is limited to the auth browser-launch ladder (`os.startfile` / stdlib `webbrowser` / `termux-open-url`) and the installers themselves.
 
 ## Config files (all in `~/.config/google-api/`)
 
@@ -48,9 +48,11 @@ The same `bin/google-api` script runs on all platforms. Platform-specific behavi
 # Copy your client_secret.json from Cloud Console
 cp /path/to/client_secret.json ~/.config/google-api/credentials.json
 
-# Opens a browser; approve the request there. Completes automatically —
-# nothing to copy or paste. (The URL is also always printed and saved to
-# ~/.config/google-api/last-auth-url.txt, in case nothing auto-opens.)
+# The URL is always printed and saved to ~/.config/google-api/last-auth-url.txt
+# BEFORE anything else happens -- copy it from there any time. After a 2-second
+# pause it also tries to auto-open a browser; approve the request there, or
+# wherever you pasted the URL -- it completes automatically either way, nothing
+# to copy back. Pass --no-auto-open to skip the browser launch entirely.
 google-api auth setup
 
 # Verify
