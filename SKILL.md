@@ -63,6 +63,11 @@ Token auto-refreshes. If it expires hard, re-run `auth setup`.
 
 ## Services (Service Usage API)
 
+Enable the **Service Usage API** itself in GCP Console first — it's not on by default
+like most of the others in this doc, and without it `services list` 404s before the
+scope issue below even comes into play. Worth enabling: it's also the API that lets you
+*enable other APIs* programmatically, not just list what's on.
+
 ```bash
 # List all enabled APIs on the project
 google-api services list --enabled
