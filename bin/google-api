@@ -1,5 +1,5 @@
-#!/data/data/com.termux/files/usr/bin/python3
-"""google-api — unified Google API CLI for openclaw/Termux.
+#!/usr/bin/env python3
+"""google-api — unified Google API CLI (Termux, Debian, Windows).
 
 Credentials: ~/.config/google-api/credentials.json  (client_secret.json from Cloud Console)
 Token:       ~/.config/google-api/token.json         (auto-managed)
@@ -220,9 +220,9 @@ PKCE flow (default, works with Desktop app OAuth client):
   Starts a local callback listener and captures the authorization code
   automatically when you approve -- nothing to copy or paste. The URL is
   printed and saved to ~/.config/google-api/last-auth-url.txt (plain
-  text, reliable regardless of terminal scrollback); also best-effort
-  opened via termux-open-url. Open it on *any* browser on this device --
-  it doesn't matter which, the listener only needs the redirect to reach
+  text, reliable regardless of terminal scrollback); the browser is also
+  opened via a best-effort platform launcher. Any browser on this host
+  works -- the listener only needs the redirect to reach 127.0.0.1.
   127.0.0.1 here, which every browser on this host can do equally well.
 
   --url-only: skip the listener entirely, just print the URL and save
@@ -271,11 +271,11 @@ AUTH_URL_FILE = os.path.join(CONFIG_DIR, "last-auth-url.txt")
 def _save_auth_url(url):
     """Always write the URL to a known, plain-text file, independent of
     terminal scrollback/capture. Whatever ends up completing the OAuth
-    approval step -- X11 chromium, the Android browser, something on a
-    different device entirely -- only needs this one unambiguous string,
-    copy-pasted or relayed by whatever means is actually reliable in a
-    given context. This is the path that's actually depended on; auto-open
-    below is pure convenience on top of it, never load-bearing."""
+    approval step -- a browser on this host, a browser on another device,
+    anything at all -- only needs this one unambiguous string, copy-pasted
+    or relayed by whatever means is actually reliable in a given context.
+    This is the path that's actually depended on; auto-open below is pure
+    convenience on top of it, never load-bearing."""
     try:
         with open(AUTH_URL_FILE, "w") as f:
             f.write(url + "\n")
@@ -284,20 +284,37 @@ def _save_auth_url(url):
         pass
 
 
-def _open_auth_url(url):
-    """Best-effort only -- auth still works with zero effect from this
-    function (the URL is always printed and saved to AUTH_URL_FILE first).
+def _detect_platform():
+    """Return the broad platform class this process is running on.
 
-    Deliberately a single mechanism (termux-open-url), not a preference
-    ladder between X11 and the Android browser: the local callback server
-    this pairs with listens on loopback, so it doesn't matter which browser
-    completes the human-approval step -- X11 chromium and the Android
-    browser both reach the same 127.0.0.1 listener on the same device
-    equally well. Picking one as "preferred" bought nothing but an extra
-    assumption (that $DISPLAY/X11 is present) that doesn't hold in general."""
+    Detection is cheap and based on the Python platform plus Termux env
+    markers, so the same code runs unmodified on Termux, Debian, Windows,
+    or any other Unix-like environment."""
+    if sys.platform == "win32":
+        return "windows"
+    if "TERMUX_VERSION" in os.environ or "com.termux" in os.environ.get("PREFIX", ""):
+        return "termux"
+    if sys.platform == "darwin":
+        return "macos"
+    return "linux"
+
+def _open_auth_url(url):
+    """Best-effort browser launch; auth completes fine if this does nothing.
+
+    The URL is already printed to the console and saved to AUTH_URL_FILE,
+    so auto-open is pure convenience. Use a small platform ladder so one
+    script works on Termux, Debian, Windows, and macOS without configuration."""
     import subprocess
+    opener = {
+        "windows": lambda: os.startfile(url),
+        "termux": lambda: subprocess.run(["termux-open-url", url], check=False, timeout=5),
+        "linux": lambda: subprocess.run(["xdg-open", url], check=False, timeout=5),
+        "macos": lambda: subprocess.run(["open", url], check=False, timeout=5),
+    }
     try:
-        subprocess.run(["termux-open-url", url], check=False, timeout=5)
+        fn = opener.get(_detect_platform())
+        if fn:
+            fn()
     except Exception:
         pass
 
@@ -326,6 +343,7 @@ def _do_token_exchange(code, verifier, redirect_uri, client_id, client_secret):
     granted = tok_resp.get("scope", "")
     if granted:
         print(f"  Scopes: {len(granted.split())} granted")
+
 
 
 def auth_setup_pkce(url_only=False):
