@@ -81,12 +81,12 @@ Don't guess the project ID or dig through the Console for it — it's already si
 `~/.config/google-api/credentials.json`'s `project_id` field (the same project the OAuth
 client itself was registered under).
 
-**Also currently non-functional even with `project_id` set**: `services.list` needs
-`https://www.googleapis.com/auth/cloud-platform` or `.../cloud-platform.read-only` — neither
-is in `SCOPES`. Fails with "Request had insufficient authentication scopes" otherwise. Adding
-`cloud-platform.read-only` would fix this; not done yet because it's a notably broad scope to
-grant a personal-use CLI (even read-only, it's project-wide, not limited to Service Usage) —
-a deliberate decision to make, not a drive-by scope add like the others in this doc.
+`services.list` needs `cloud-platform.read-only`, now in `SCOPES` (added deliberately, not
+a drive-by — it's project-wide read access, broader than everything else in this doc, which
+is each scoped to its own single service. Added because APIs here are enabled one at a time
+by hand in GCP Console, and the operator wanted an explicit record of what's reachable rather
+than an implicit pass-over). Re-run `auth setup` after pulling this change — the scope grant
+only takes effect on a fresh token, not an existing one.
 
 ## Gmail
 

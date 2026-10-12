@@ -44,9 +44,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/contacts",
     "https://www.googleapis.com/auth/gmail.labels",
     "https://www.googleapis.com/auth/gmail.settings.basic",
+    "https://www.googleapis.com/auth/cloud-platform.read-only",
     # keep: restricted API, not available to third-party apps
     # photoslibrary: restricted scope requiring Google app verification — use drive photos instead
-    # cloud-platform: add after enabling Service Usage API
 ]
 
 # ---------------------------------------------------------------------------
