@@ -96,8 +96,11 @@ google-api gmail read <message-id>
 google-api gmail send --to a@b.com --subject "Hi" --body "Hello"
 google-api gmail send --to a@b.com --subject "Hi" --body '<p>See attached <img src="cid:photo"></p>' --image /path/to/photo.jpg
 google-api gmail labels
+google-api gmail label-create --name "GitHub"
 google-api gmail mark-read <message-id>...
 google-api gmail archive <message-id>...
+google-api gmail filter-create --from "noreply@github.com" --label "GitHub" --archive
+google-api gmail filters
 ```
 
 `gmail send` uses the Gmail API by default — no inline images possible (the API path

@@ -609,12 +609,15 @@ def cmd_gmail(args):
     sub = args[0] if args else "help"
     rest = args[1:]
     {
-        "search":    lambda: gmail_search(rest),
-        "read":      lambda: gmail_read(rest),
-        "send":      lambda: gmail_send(rest),
-        "labels":    lambda: gmail_labels(rest),
-        "mark-read": lambda: gmail_mark_read(rest),
-        "archive":   lambda: gmail_archive(rest),
+        "search":        lambda: gmail_search(rest),
+        "read":          lambda: gmail_read(rest),
+        "send":          lambda: gmail_send(rest),
+        "labels":        lambda: gmail_labels(rest),
+        "mark-read":     lambda: gmail_mark_read(rest),
+        "archive":       lambda: gmail_archive(rest),
+        "filter-create": lambda: gmail_filter_create(rest),
+        "filters":       lambda: gmail_filters(rest),
+        "label-create":  lambda: gmail_label_create(rest),
     }.get(sub, lambda: gmail_help())()
 
 
@@ -632,6 +635,12 @@ Usage: google-api gmail <command>
   labels                              List labels
   mark-read <message-id>...            Remove UNREAD label
   archive <message-id>...             Remove INBOX label (archive)
+  filter-create [criteria] [actions]   Create a filter rule
+  filters                             List existing filters
+  label-create --name NAME [--color COLOR]  Create a new label
+
+Filter criteria: --from, --to, --subject, --has, --has-attachment
+Filter actions:  --label NAME, --archive, --mark-read, --trash, --spam
 """)
 
 
@@ -879,6 +888,134 @@ def gmail_archive(args):
             print(f"  Failed {msg_id}: {result['error'].get('message', result)}")
         else:
             print(f"✓ Archived — {msg_id}")
+
+
+def _get_label_id_by_name(name, token):
+    """Look up a label ID by its display name (case-insensitive)."""
+    result = http_get("https://gmail.googleapis.com/gmail/v1/users/me/labels", token=token)
+    if "error" in result:
+        return None
+    for label in result.get("labels", []):
+        if label.get("name", "").lower() == name.lower():
+            return label["id"]
+    return None
+
+
+def gmail_filter_create(args):
+    criteria = {}
+    actions = {}
+    label_name = None
+
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--from" and i + 1 < len(args):
+            criteria["from"] = args[i + 1]; i += 2
+        elif a == "--to" and i + 1 < len(args):
+            criteria["to"] = args[i + 1]; i += 2
+        elif a == "--subject" and i + 1 < len(args):
+            criteria["subject"] = args[i + 1]; i += 2
+        elif a == "--has" and i + 1 < len(args):
+            criteria["query"] = args[i + 1]; i += 2
+        elif a == "--has-attachment":
+            criteria["hasAttachment"] = True; i += 1
+        elif a == "--label" and i + 1 < len(args):
+            label_name = args[i + 1]; i += 2
+        elif a == "--archive":
+            actions["removeLabelIds"] = actions.get("removeLabelIds", []) + ["INBOX"]; i += 1
+        elif a == "--mark-read":
+            actions["removeLabelIds"] = actions.get("removeLabelIds", []) + ["UNREAD"]; i += 1
+        elif a == "--trash":
+            actions["addLabelIds"] = actions.get("addLabelIds", []) + ["TRASH"]; i += 1
+        elif a == "--spam":
+            actions["addLabelIds"] = actions.get("addLabelIds", []) + ["SPAM"]; i += 1
+        elif a == "--yes" or a == "-y":
+            i += 1
+        else:
+            i += 1
+
+    if not criteria:
+        die("Usage: google-api gmail filter-create [--from ADDR] [--to ADDR] [--subject S] [--has WORDS] [--has-attachment] [--label NAME] [--archive] [--mark-read] [--trash] [--spam]")
+
+    t = get_access_token()
+
+    # Resolve label name to ID if provided
+    if label_name:
+        label_id = _get_label_id_by_name(label_name, t)
+        if not label_id:
+            die(f"Label not found: {label_name!r}. Create it first or use an existing label name.")
+        actions.setdefault("addLabelIds", []).append(label_id)
+
+    if not actions:
+        die("No actions specified. Add at least one of: --label, --archive, --mark-read, --trash, --spam")
+
+    body = {"criteria": criteria, "action": actions}
+    result = http_req("POST",
+        "https://gmail.googleapis.com/gmail/v1/users/me/settings/filters",
+        token=t, body=body
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Filter created — ID: {result.get('id')}")
+    if criteria:
+        print(f"  Criteria: {criteria}")
+    if actions:
+        print(f"  Actions:  {actions}")
+
+
+def gmail_filters(args):
+    t = get_access_token()
+    result = http_get("https://gmail.googleapis.com/gmail/v1/users/me/settings/filters", token=t)
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    filters = result.get("filter", [])
+    if not filters:
+        print("No filters found.")
+        return
+    for f in filters:
+        fid = f.get("id", "unknown")
+        crit = f.get("criteria", {})
+        act = f.get("action", {})
+        print(f"Filter {fid}")
+        if crit.get("from"):      print(f"  From:     {crit['from']}")
+        if crit.get("to"):        print(f"  To:       {crit['to']}")
+        if crit.get("subject"):   print(f"  Subject:  {crit['subject']}")
+        if crit.get("query"):     print(f"  Has:      {crit['query']}")
+        if crit.get("hasAttachment"): print(f"  Has attachment")
+        act_labels = act.get("addLabelIds", [])
+        rem_labels = act.get("removeLabelIds", [])
+        if act_labels: print(f"  Add labels: {act_labels}")
+        if rem_labels: print(f"  Remove labels: {rem_labels}")
+        print()
+
+
+def gmail_label_create(args):
+    name = ""
+    color = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--name" and i + 1 < len(args):
+            name = args[i + 1]; i += 2
+        elif args[i] == "--color" and i + 1 < len(args):
+            color = args[i + 1]; i += 2
+        else:
+            i += 1
+
+    if not name:
+        die("Usage: google-api gmail label-create --name NAME [--color COLOR]")
+
+    t = get_access_token()
+    body = {"name": name}
+    if color:
+        body["color"] = {"textColor": color, "backgroundColor": color}
+
+    result = http_req("POST",
+        "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+        token=t, body=body
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Created label '{name}' — ID: {result.get('id')}")
 
 
 # ---------------------------------------------------------------------------
