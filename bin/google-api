@@ -609,10 +609,12 @@ def cmd_gmail(args):
     sub = args[0] if args else "help"
     rest = args[1:]
     {
-        "search": lambda: gmail_search(rest),
-        "read":   lambda: gmail_read(rest),
-        "send":   lambda: gmail_send(rest),
-        "labels": lambda: gmail_labels(rest),
+        "search":    lambda: gmail_search(rest),
+        "read":      lambda: gmail_read(rest),
+        "send":      lambda: gmail_send(rest),
+        "labels":    lambda: gmail_labels(rest),
+        "mark-read": lambda: gmail_mark_read(rest),
+        "archive":   lambda: gmail_archive(rest),
     }.get(sub, lambda: gmail_help())()
 
 
@@ -628,6 +630,8 @@ Usage: google-api gmail <command>
                                        app.passwd exists, else the Gmail API
                                        (no inline images). Prompts unless --yes.
   labels                              List labels
+  mark-read <message-id>...            Remove UNREAD label
+  archive <message-id>...             Remove INBOX label (archive)
 """)
 
 
@@ -845,6 +849,36 @@ def gmail_labels(args):
         die(result["error"].get("message", str(result)))
     for label in result.get("labels", []):
         print(f"{label['id']:<30} {label['name']}")
+
+
+def gmail_mark_read(args):
+    if not args:
+        die("Usage: google-api gmail mark-read <message-id>...")
+    t = get_access_token()
+    for msg_id in args:
+        result = http_req("POST",
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}/modify",
+            token=t, body={"removeLabelIds": ["UNREAD"]}
+        )
+        if "error" in result:
+            print(f"  Failed {msg_id}: {result['error'].get('message', result)}")
+        else:
+            print(f"✓ Marked read — {msg_id}")
+
+
+def gmail_archive(args):
+    if not args:
+        die("Usage: google-api gmail archive <message-id>...")
+    t = get_access_token()
+    for msg_id in args:
+        result = http_req("POST",
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}/modify",
+            token=t, body={"removeLabelIds": ["INBOX"]}
+        )
+        if "error" in result:
+            print(f"  Failed {msg_id}: {result['error'].get('message', result)}")
+        else:
+            print(f"✓ Archived — {msg_id}")
 
 
 # ---------------------------------------------------------------------------
