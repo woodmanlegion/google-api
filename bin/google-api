@@ -620,6 +620,10 @@ def cmd_gmail(args):
         "label-create":  lambda: gmail_label_create(rest),
         "label-add":     lambda: gmail_label_add(rest),
         "label-remove":  lambda: gmail_label_remove(rest),
+        "draft-create":  lambda: gmail_draft_create(rest),
+        "draft-list":    lambda: gmail_draft_list(rest),
+        "draft-send":    lambda: gmail_draft_send(rest),
+        "draft-delete":  lambda: gmail_draft_delete(rest),
     }.get(sub, lambda: gmail_help())()
 
 
@@ -642,6 +646,12 @@ Usage: google-api gmail <command>
   label-create --name NAME [--color COLOR]  Create a new label
   label-add --label NAME <message-id>...      Add label to messages
   label-remove --label NAME <message-id>...   Remove label from messages
+  draft-create --to ADDR --subject S --body B [--image PATH[:CID]]... [--yes]
+                                       Create a draft with full MIME support
+                                       (inline images, multipart/related)
+  draft-list [--max N]                 List drafts
+  draft-send <draft-id> [--yes]        Send a draft
+  draft-delete <draft-id> [--yes]      Delete a draft
 
 Filter criteria: --from, --to, --subject, --has, --has-attachment
 Filter actions:  --label NAME, --archive, --mark-read, --trash, --spam
@@ -1082,6 +1092,168 @@ def gmail_label_remove(args):
             print(f"  Failed {msg_id}: {result['error'].get('message', result)}")
         else:
             print(f"✓ Removed '{label_name}' from {msg_id}")
+
+
+def _build_mime_message(to, subject, body, images):
+    """Build a multipart/related MIME message with inline images."""
+    import base64
+    import email.mime.multipart
+    import email.mime.text
+    import email.mime.image
+
+    from_addr = _authenticated_email()
+    if not from_addr:
+        die("Could not determine authenticated Gmail address")
+
+    # Outer multipart/related for inline images
+    msg = email.mime.multipart.MIMEMultipart("related")
+    msg["From"] = from_addr
+    msg["To"] = to
+    msg["Subject"] = subject
+
+    # HTML body
+    msg.attach(email.mime.text.MIMEText(body, "html"))
+
+    # Inline images
+    for path, cid in images:
+        if not os.path.exists(path):
+            die(f"Image not found: {path}")
+        with open(path, "rb") as f:
+            img = email.mime.image.MIMEImage(f.read())
+        img.add_header("Content-ID", f"<{cid}>")
+        img.add_header("Content-Disposition", "inline", filename=os.path.basename(path))
+        msg.attach(img)
+
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+
+def gmail_draft_create(args):
+    to = subject = body = ""
+    images = []  # [(path, cid), ...]
+    confirmed = "--yes" in args or "-y" in args
+    i = 0
+    while i < len(args):
+        if args[i] == "--to" and i + 1 < len(args):
+            to = args[i + 1]; i += 2
+        elif args[i] == "--subject" and i + 1 < len(args):
+            subject = args[i + 1]; i += 2
+        elif args[i] == "--body" and i + 1 < len(args):
+            body = args[i + 1]; i += 2
+        elif args[i] == "--image" and i + 1 < len(args):
+            spec = args[i + 1]
+            path, _, cid = spec.partition(":")
+            if not cid:
+                cid = os.path.splitext(os.path.basename(path))[0]
+            images.append((path, cid))
+            i += 2
+        else:
+            i += 1
+
+    if not to or not subject:
+        die("Usage: google-api gmail draft-create --to ADDR --subject S --body B [--image PATH[:CID] ...] [--yes]")
+
+    if not confirmed:
+        print(f"Create draft to {to!r}, subject {subject!r}?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    raw = _build_mime_message(to, subject, body, images)
+
+    t = get_access_token()
+    result = http_req("POST",
+        "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+        token=t, body={"message": {"raw": raw}}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Draft created — ID: {result.get('id')}")
+
+
+def gmail_draft_list(args):
+    max_results = 10
+    as_json = "--json" in args
+    for i, a in enumerate(args):
+        if a == "--max" and i + 1 < len(args):
+            max_results = int(args[i + 1])
+
+    t = get_access_token()
+    result = http_get(
+        "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+        token=t, params={"maxResults": max_results}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+
+    drafts = result.get("drafts", [])
+    if as_json:
+        jprint(drafts)
+        return
+
+    if not drafts:
+        print("No drafts found.")
+        return
+
+    for d in drafts:
+        draft_id = d.get("id", "")
+        msg_id = d.get("message", {}).get("id", "")
+        # Fetch message details
+        detail = http_get(
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+            token=t, params={"format": "metadata",
+                              "metadataHeaders": ["From", "Subject", "Date"]}
+        )
+        headers = {h["name"]: h["value"]
+                   for h in detail.get("payload", {}).get("headers", [])}
+        print(f"Draft {draft_id}")
+        print(f"  To:      {headers.get('To', '')}")
+        print(f"  Subject: {headers.get('Subject', '')}")
+        print(f"  Date:    {headers.get('Date', '')}")
+        print()
+
+
+def gmail_draft_send(args):
+    if not args or args[0].startswith("--"):
+        die("Usage: google-api gmail draft-send <draft-id> [--yes]")
+    draft_id = args[0]
+    confirmed = "--yes" in args or "-y" in args
+
+    if not confirmed:
+        print(f"Send draft {draft_id}?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    t = get_access_token()
+    result = http_req("POST",
+        f"https://gmail.googleapis.com/gmail/v1/users/me/drafts/send",
+        token=t, body={"id": draft_id}
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Draft sent — message ID: {result.get('message', {}).get('id')}")
+
+
+def gmail_draft_delete(args):
+    if not args or args[0].startswith("--"):
+        die("Usage: google-api gmail draft-delete <draft-id> [--yes]")
+    draft_id = args[0]
+    confirmed = "--yes" in args or "-y" in args
+
+    if not confirmed:
+        print(f"Delete draft {draft_id}?")
+        if input("Confirm [y/N]: ").strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    t = get_access_token()
+    result = http_req("DELETE",
+        f"https://gmail.googleapis.com/gmail/v1/users/me/drafts/{draft_id}",
+        token=t
+    )
+    if "error" in result:
+        die(result["error"].get("message", str(result)))
+    print(f"✓ Draft deleted — {draft_id}")
 
 
 # ---------------------------------------------------------------------------
