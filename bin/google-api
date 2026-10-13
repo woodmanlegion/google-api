@@ -618,6 +618,8 @@ def cmd_gmail(args):
         "filter-create": lambda: gmail_filter_create(rest),
         "filters":       lambda: gmail_filters(rest),
         "label-create":  lambda: gmail_label_create(rest),
+        "label-add":     lambda: gmail_label_add(rest),
+        "label-remove":  lambda: gmail_label_remove(rest),
     }.get(sub, lambda: gmail_help())()
 
 
@@ -638,6 +640,8 @@ Usage: google-api gmail <command>
   filter-create [criteria] [actions]   Create a filter rule
   filters                             List existing filters
   label-create --name NAME [--color COLOR]  Create a new label
+  label-add --label NAME <message-id>...      Add label to messages
+  label-remove --label NAME <message-id>...   Remove label from messages
 
 Filter criteria: --from, --to, --subject, --has, --has-attachment
 Filter actions:  --label NAME, --archive, --mark-read, --trash, --spam
@@ -1016,6 +1020,68 @@ def gmail_label_create(args):
     if "error" in result:
         die(result["error"].get("message", str(result)))
     print(f"✓ Created label '{name}' — ID: {result.get('id')}")
+
+
+def gmail_label_add(args):
+    label_name = None
+    msg_ids = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--label" and i + 1 < len(args):
+            label_name = args[i + 1]; i += 2
+        elif not args[i].startswith("--"):
+            msg_ids.append(args[i]); i += 1
+        else:
+            i += 1
+
+    if not label_name or not msg_ids:
+        die("Usage: google-api gmail label-add --label NAME <message-id>...")
+
+    t = get_access_token()
+    label_id = _get_label_id_by_name(label_name, t)
+    if not label_id:
+        die(f"Label not found: {label_name!r}")
+
+    for msg_id in msg_ids:
+        result = http_req("POST",
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}/modify",
+            token=t, body={"addLabelIds": [label_id]}
+        )
+        if "error" in result:
+            print(f"  Failed {msg_id}: {result['error'].get('message', result)}")
+        else:
+            print(f"✓ Added '{label_name}' to {msg_id}")
+
+
+def gmail_label_remove(args):
+    label_name = None
+    msg_ids = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--label" and i + 1 < len(args):
+            label_name = args[i + 1]; i += 2
+        elif not args[i].startswith("--"):
+            msg_ids.append(args[i]); i += 1
+        else:
+            i += 1
+
+    if not label_name or not msg_ids:
+        die("Usage: google-api gmail label-remove --label NAME <message-id>...")
+
+    t = get_access_token()
+    label_id = _get_label_id_by_name(label_name, t)
+    if not label_id:
+        die(f"Label not found: {label_name!r}")
+
+    for msg_id in msg_ids:
+        result = http_req("POST",
+            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}/modify",
+            token=t, body={"removeLabelIds": [label_id]}
+        )
+        if "error" in result:
+            print(f"  Failed {msg_id}: {result['error'].get('message', result)}")
+        else:
+            print(f"✓ Removed '{label_name}' from {msg_id}")
 
 
 # ---------------------------------------------------------------------------
